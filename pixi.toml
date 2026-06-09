@@ -1,0 +1,54 @@
+[workspace]
+name = "smi-acquire"
+description = "Flexible sample-list + technique-picker + script-generator GUI for the NSLS-II SMI-SWAXS endstation"
+channels = ["conda-forge"]
+platforms = ["linux-64", "osx-arm64", "osx-64"]
+
+[dependencies]
+python = "3.11.*"
+numpy = ">=1.26,<3"
+pandas = ">=2.0,<3"
+bokeh = ">=3.9,<4"
+panel = ">=1.8,<2"
+pytest = "*"
+
+[pypi-dependencies]
+smi-acquire = { path = ".", editable = true }
+
+# Path to the smi_plans templates package (the pure-Python Sample model + technique plans).
+# The core auto-discovers a couple of known locations; override here if yours differs.
+[activation.env]
+SMI_PLANS_PATH = "/nsls2/users/egann/git/smi/scripts/SWAXS_user_scripts/templates"
+PYTHONNOUSERSITE = "1"
+
+# ---- Panel front-ends (the two layout candidates) -------------------------
+[tasks.wizard]
+cmd = "panel serve apps/panel_wizard.py --show --autoreload"
+
+[tasks.dashboard]
+cmd = "panel serve apps/panel_dashboard.py --show --autoreload"
+
+[tasks.test]
+cmd = "python -m pytest tests/ -q"
+
+[tasks.check]
+cmd = "python -c \"import smi_acquire; print('core OK', smi_acquire.__version__)\""
+
+# ---- Optional Qt desktop variant -----------------------------------------
+[feature.qt.pypi-dependencies]
+pyside6 = "*"
+
+[feature.qt.tasks.qt]
+cmd = "python apps/qt_app.py"
+
+# ---- Optional NiceGUI variant --------------------------------------------
+[feature.nicegui.pypi-dependencies]
+nicegui = "*"
+
+[feature.nicegui.tasks.nicegui]
+cmd = "python apps/nicegui_app.py"
+
+[environments]
+default = { solve-group = "default" }
+qt = { features = ["qt"], solve-group = "default" }
+nicegui = { features = ["nicegui"], solve-group = "default" }
