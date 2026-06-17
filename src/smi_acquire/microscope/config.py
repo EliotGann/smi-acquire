@@ -43,7 +43,17 @@ class EpicsConfig(BaseModel):
     #           the structured value itself, no separate PVs needed.
     image_protocol: str = "ca"  # "ca" | "pva"
     image_pv: str = "image1:ArrayData"
+    # The PRIMARY in-plane alignment axes the camera click-to-move drives (x/y/z). By the SMI
+    # stack these are normally the piezo fine axes; kept as ``motors`` for back-compat (every
+    # microscope mode uses stage.x/.y/.z).
     motors: dict[str, str]
+    # The full stacked stage, so a captured position records EVERY axis (SAMPLE_SYSTEM_PLAN
+    # Position has piezo_* + stage_*). Optional: absent axes are simply not captured/moved.
+    #   piezo_motors: the SmarAct fine stage  {x,y,z,th,chi}
+    #   stage_motors: the Huber coarse stage  {x,y,z,theta,chi,phi}
+    # When given, ``motors`` (the click-to-move axes) usually duplicates piezo_motors' x/y/z.
+    piezo_motors: dict[str, str] = Field(default_factory=dict)
+    stage_motors: dict[str, str] = Field(default_factory=dict)
     sample_name_pv: str | None = None
 
 

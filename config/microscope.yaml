@@ -3,10 +3,25 @@ epics:
   cam_suffix: 'cam1:'
   image_protocol: ca
   image_pv: image1:ArrayData
+  # Primary click-to-move axes (the fine piezo x/y/z drive the on-axis view).
   motors:
-    x: SWAXS:SIM:mtrX
-    y: SWAXS:SIM:mtrY
-    z: SWAXS:SIM:mtrZ
+    x: SWAXS:SIM:pzX
+    y: SWAXS:SIM:pzY
+    z: SWAXS:SIM:pzZ
+  # Full stacked stage so a captured position records every axis (piezo_* + stage_*).
+  piezo_motors:
+    x: SWAXS:SIM:pzX
+    y: SWAXS:SIM:pzY
+    z: SWAXS:SIM:pzZ
+    th: SWAXS:SIM:pzTH
+    chi: SWAXS:SIM:pzCHI
+  stage_motors:
+    x: SWAXS:SIM:hX
+    y: SWAXS:SIM:hY
+    z: SWAXS:SIM:hZ
+    theta: SWAXS:SIM:hTHETA
+    chi: SWAXS:SIM:hCHI
+    phi: SWAXS:SIM:hPHI
   sample_name_pv: null
 beam:
   center_px:

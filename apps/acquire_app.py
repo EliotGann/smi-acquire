@@ -149,14 +149,15 @@ class AcquireApp:
 
     # -- live stage axes (microscope reading) ------------------------------
     def _stage_axes(self) -> dict:
-        """A dict of the axes the microscope exposes today: ``{"x":.., "y":.., "z":..}``."""
+        """All configured stage axes as ``{Position-field: value}`` (piezo_* + stage_*).
+
+        Reads the full stacked stage so a captured position records every axis the microscope
+        exposes; falls back to the primary x/y/z when only those are configured.
+        """
         if self.micro is None:
             return {}
-        s = self.micro.stage
         try:
-            return {"x": round(float(s.x.position), 4),
-                    "y": round(float(s.y.position), 4),
-                    "z": round(float(s.z.position), 4)}
+            return self.micro.stage.read_all_axes()
         except Exception:
             return {}
 
@@ -496,11 +497,18 @@ class AcquireApp:
                 "Microscope unavailable: {}\n\nStart the fake IOC: `pixi run dev-ioc`, then "
                 "reload.".format(exc), alert_type="warning"))
 
+    @staticmethod
+    def _primary_xyz(ax: dict):
+        """The display/reference x/y/z from a full-axis dict (piezo_*, else stage_*)."""
+        def pick(a):
+            return ax.get("piezo_" + a, ax.get("stage_" + a))
+        return pick("x"), pick("y"), pick("z")
+
     def _refresh_pos(self):
         ax = self._stage_axes()
         if ax:
-            self.pos_readout.object = "position: **x {} · y {} · z {}**".format(
-                ax.get("x"), ax.get("y"), ax.get("z"))
+            x, y, z = self._primary_xyz(ax)
+            self.pos_readout.object = "position: **x {} · y {} · z {}**".format(x, y, z)
 
     def _on_new_here(self, _e):
         name = (self.capture_name.value or "").strip() or self._next_name()
@@ -522,10 +530,10 @@ class AcquireApp:
 
     def _on_ref_here(self, _e):
         ax = self._stage_axes()
+        x, y, z = self._primary_xyz(ax)
         name = (self.capture_name.value or "").strip() or "ref{}".format(
             len(self.project.references) + 1)
-        self.project.references.append(
-            Reference(name=name, x=ax.get("x"), y=ax.get("y"), z=ax.get("z")))
+        self.project.references.append(Reference(name=name, x=x, y=y, z=z))
         self.capture_name.value = ""
         self.refresh_spine()
         _toast("added reference '{}'".format(name))

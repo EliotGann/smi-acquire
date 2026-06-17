@@ -6,10 +6,16 @@ Publishes:
   - SWAXS:SIM:cam1:ArraySize2_RBV  (uint, height)
   - SWAXS:SIM:cam1:ColorMode_RBV   (string, "RGB3")
   - SWAXS:SIM:image1:ArrayData     (uint8 buffer, drifting pattern)
-  - SWAXS:SIM:mtrX / mtrY / mtrZ   (fake motor records via caproto's example)
+  - the stacked sample stage as fake motor records (SMI geometry):
+      piezo (fine, top):  SWAXS:SIM:pzX / pzY / pzZ / pzTH / pzCHI
+      Huber (coarse):     SWAXS:SIM:hX / hY / hZ / hTHETA / hCHI / hPHI
+  - legacy aliases SWAXS:SIM:mtrX / mtrY / mtrZ kept pointing at the piezo x/y/z so older
+    configs (motors: {x: mtrX, ...}) still resolve.
 
-The image pattern depends on the motor positions so click-to-move and bookmark projection
-have something meaningful to track.
+The image pattern depends on the (piezo) x/y/z motor positions so click-to-move and bookmark
+projection have something meaningful to track.  (The rotation axes do NOT yet rotate the
+synthetic image — the rotation-aware click math is deferred to real-hardware work; here they
+exist so the full axis state can be captured and moved.)
 """
 
 from __future__ import annotations
@@ -103,14 +109,15 @@ class ImageGroup(PVGroup):
     @array_data.startup
     async def array_data(self, instance, async_lib):
         # ``parent`` is the SwaxsSimIOC instance. caproto's FakeMotor stores the motor record
-        # readback under ``.motor.field_inst.user_readback_value`` (the .RBV field).
+        # readback under ``.motor.field_inst.user_readback_value`` (the .RBV field). The image
+        # tracks the PIEZO x/y/z (the fine top stage the click-to-move drives).
         parent = self.parent
         t0 = 0.0
         while True:
             try:
-                mx = float(parent.mtrX.motor.field_inst.user_readback_value.value)
-                my = float(parent.mtrY.motor.field_inst.user_readback_value.value)
-                mz = float(parent.mtrZ.motor.field_inst.user_readback_value.value)
+                mx = float(parent.pzX.motor.field_inst.user_readback_value.value)
+                my = float(parent.pzY.motor.field_inst.user_readback_value.value)
+                mz = float(parent.pzZ.motor.field_inst.user_readback_value.value)
             except Exception:
                 mx = my = mz = 0.0
             frame = _render_frame(t0, mx, my, mz)
@@ -122,6 +129,20 @@ class ImageGroup(PVGroup):
 class SwaxsSimIOC(PVGroup):
     cam = SubGroup(CamGroup, prefix="cam1:")
     image = SubGroup(ImageGroup, prefix="image1:")
+    # --- piezo fine stage (top of the stack): x/y/z/th/chi ---
+    pzX = SubGroup(FakeMotor, velocity=2.0, precision=4, user_limits=(-50.0, 50.0), prefix="pzX")
+    pzY = SubGroup(FakeMotor, velocity=2.0, precision=4, user_limits=(-50.0, 50.0), prefix="pzY")
+    pzZ = SubGroup(FakeMotor, velocity=2.0, precision=4, user_limits=(-50.0, 50.0), prefix="pzZ")
+    pzTH = SubGroup(FakeMotor, velocity=2.0, precision=4, user_limits=(-5.0, 5.0), prefix="pzTH")
+    pzCHI = SubGroup(FakeMotor, velocity=2.0, precision=4, user_limits=(-5.0, 5.0), prefix="pzCHI")
+    # --- Huber coarse stage (bottom): x/y/z + rotations theta/chi/phi ---
+    hX = SubGroup(FakeMotor, velocity=2.0, precision=4, user_limits=(-100.0, 100.0), prefix="hX")
+    hY = SubGroup(FakeMotor, velocity=2.0, precision=4, user_limits=(-100.0, 100.0), prefix="hY")
+    hZ = SubGroup(FakeMotor, velocity=2.0, precision=4, user_limits=(-100.0, 100.0), prefix="hZ")
+    hTHETA = SubGroup(FakeMotor, velocity=2.0, precision=4, user_limits=(-5.0, 5.0), prefix="hTHETA")
+    hCHI = SubGroup(FakeMotor, velocity=2.0, precision=4, user_limits=(-5.0, 5.0), prefix="hCHI")
+    hPHI = SubGroup(FakeMotor, velocity=5.0, precision=4, user_limits=(-90.0, 90.0), prefix="hPHI")
+    # --- legacy aliases: the old configs used mtrX/Y/Z; point them at the piezo x/y/z ---
     mtrX = SubGroup(FakeMotor, velocity=2.0, precision=4, user_limits=(-50.0, 50.0), prefix="mtrX")
     mtrY = SubGroup(FakeMotor, velocity=2.0, precision=4, user_limits=(-50.0, 50.0), prefix="mtrY")
     mtrZ = SubGroup(FakeMotor, velocity=2.0, precision=4, user_limits=(-50.0, 50.0), prefix="mtrZ")

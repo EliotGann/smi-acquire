@@ -69,21 +69,91 @@ class Camera(Device):
             self.image.wait_for_connection(timeout=timeout)
 
 
+class _AxisGroup:
+    """A bare namespace of EpicsMotors keyed by short axis name (built from a PV dict)."""
+
+    def __init__(self, motors: dict):
+        self._motors = motors
+        for axis, m in motors.items():
+            setattr(self, axis, m)
+
+    def __iter__(self):
+        return iter(self._motors.items())
+
+    def wait_for_connection(self, timeout: float = 5.0) -> None:
+        for m in self._motors.values():
+            m.wait_for_connection(timeout=timeout)
+
+
 class SampleStage(Device):
-    """Container of three EpicsMotors. Built at runtime from configured PV strings."""
+    """The stacked SMI sample stage.
+
+    Exposes the **primary click-to-move axes** as ``.x/.y/.z`` (built from ``epics.motors`` — by
+    the SMI stack these are normally the piezo fine axes), and, when configured, the **full
+    stack** so a captured position records every axis:
+
+    * ``.piezo`` — the SmarAct fine stage (``x/y/z/th/chi``), from ``epics.piezo_motors``.
+    * ``.huber`` — the Huber coarse stage (``x/y/z/theta/chi/phi``), from ``epics.stage_motors``.
+
+    :meth:`all_axes` returns ``{position_field: motor}`` over every connected axis using the
+    ``smi_plans.Position`` field names (``piezo_x`` … ``stage_phi``), which is what the app reads
+    to capture a complete position.
+    """
 
     @classmethod
     def from_config(cls, epics_cfg: EpicsConfig, name: str = "stage") -> "SampleStage":
-        motors = {
+        # Primary x/y/z (the click-to-move axes every microscope mode uses).
+        primary = {
             axis: EpicsMotor(pv, name=f"{name}_{axis}")
             for axis, pv in epics_cfg.motors.items()
         }
         obj = cls.__new__(cls)
         obj.name = name
-        obj.x = motors["x"]
-        obj.y = motors["y"]
-        obj.z = motors["z"]
+        obj.x = primary["x"]
+        obj.y = primary["y"]
+        obj.z = primary["z"]
+
+        # Full stacked axes (optional). Reuse the primary EpicsMotor objects where the PV string
+        # matches, so we don't open two CA channels to the same record.
+        by_pv = {pv: m for (axis, pv), m in zip(epics_cfg.motors.items(), primary.values())}
+
+        def _build(axes_cfg: dict, prefix: str):
+            out = {}
+            for axis, pv in axes_cfg.items():
+                out[axis] = by_pv.get(pv) or EpicsMotor(pv, name=f"{name}_{prefix}_{axis}")
+            return out
+
+        piezo_motors = _build(epics_cfg.piezo_motors, "piezo")
+        huber_motors = _build(epics_cfg.stage_motors, "huber")
+        obj.piezo = _AxisGroup(piezo_motors) if piezo_motors else None
+        obj.huber = _AxisGroup(huber_motors) if huber_motors else None
+        obj._piezo_motors = piezo_motors
+        obj._huber_motors = huber_motors
         return obj
+
+    def all_axes(self) -> dict:
+        """``{Position-field: EpicsMotor}`` over every configured axis (piezo_* + stage_*).
+
+        Falls back to the primary x/y/z (mapped to ``piezo_*``) when no full stack is configured.
+        """
+        out = {}
+        for axis, m in getattr(self, "_piezo_motors", {}).items():
+            out[f"piezo_{axis}"] = m
+        for axis, m in getattr(self, "_huber_motors", {}).items():
+            out[f"stage_{axis}"] = m
+        if not out:                       # minimal config: only primary x/y/z
+            out = {"piezo_x": self.x, "piezo_y": self.y, "piezo_z": self.z}
+        return out
+
+    def read_all_axes(self) -> dict:
+        """``{Position-field: position}`` for every configured axis that reads back."""
+        readings = {}
+        for field, m in self.all_axes().items():
+            try:
+                readings[field] = round(float(m.position), 4)
+            except Exception:
+                pass
+        return readings
 
     def wait_for_connection(self, timeout: float = 5.0) -> None:
         for m in (self.x, self.y, self.z):
