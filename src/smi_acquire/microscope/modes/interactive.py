@@ -59,14 +59,20 @@ class InteractiveMode:
         cfg: AppConfig,
         image_size_hint_provider,
         executor=None,
+        huber_calibration: "CalibrationModel | None" = None,
     ) -> None:
         self.fig = fig
         self.stage = stage
         self.beam = beam_overlay
-        self.calibration = calibration
+        self.calibration = calibration            # piezo affine (the default click-to-move)
+        self.huber_calibration = huber_calibration  # Huber affine (range-extender fallback)
         self.cfg = cfg
         self._dims = image_size_hint_provider
         self.executor = executor
+        # Which stack click-to-move drives: "piezo" (fast/precise default) or "huber" (coarse
+        # range extender). The piezo rides on the Huber, so each calibration is fit at a given
+        # Huber orientation (rotation coupling handled in the deferred 6d work).
+        self._move_stack = "piezo"
         self._active = False
 
         # ---- explore (click-to-move) state ----------------------------------------
@@ -179,6 +185,18 @@ class InteractiveMode:
             ),
         )
 
+        # Click-to-move stack selector: piezo (default, fast/precise) vs the Huber coarse stage
+        # (range extender; slower — turn it off when not needed). Only offered when the stage
+        # exposes a Huber group.
+        self._stack_toggle = pn.widgets.RadioButtonGroup(
+            name="Click-to-move", options=["piezo", "Huber"], value="piezo",
+            button_type="primary", width=200)
+        self._stack_toggle.param.watch(self._on_stack_change, "value")
+        _has_huber = getattr(self.stage, "huber", None) is not None
+        self._stack_row = pn.Row(
+            pn.pane.Markdown("**move with:**", width=80), self._stack_toggle,
+            visible=_has_huber)
+
         # The Move/explore tab body (click-to-move only — the bookmark list lives on the far
         # right now, shared across all tabs).
         self.move_panel = pn.Column(
@@ -187,6 +205,7 @@ class InteractiveMode:
                 "**Click** on the image to preview a move; **click again** within "
                 f"{int(_COMMIT_TOLERANCE_PX)} px to commit. Click elsewhere or press Esc to restart."
             ),
+            self._stack_row,
             self._proposed,
             self._cancel_btn,
         )
@@ -395,15 +414,45 @@ class InteractiveMode:
     def _show_preview(self, x: float, y: float) -> None:
         self._pending = (x, y)
         beam_px = self.beam.center
-        dm = self.calibration.click_to_motor_delta((x, y), beam_px)
+        dm = self._active_calibration().click_to_motor_delta((x, y), beam_px)
         self._preview_cds.data = {"x": [x], "y": [y]}
         self._line_cds.data = {"x": [beam_px[0], x], "y": [beam_px[1], y]}
         self._preview_renderer.visible = True
         self._line_renderer.visible = True
-        u = self.cfg.ui.motor_units
+        # Units differ by stack: piezo is µm, the Huber coarse stage is mm.
+        u = "mm" if self._move_stack == "huber" else self.cfg.ui.motor_units
         self._proposed.value = (
-            f"preview Δx={dm[0]:+.4f} {u}  Δy={dm[1]:+.4f} {u}  → click again to commit"
+            f"preview [{self._move_stack}] Δx={dm[0]:+.4f} {u}  Δy={dm[1]:+.4f} {u}  "
+            f"→ click again to commit"
         )
+
+    def _on_stack_change(self, event) -> None:
+        self._move_stack = "huber" if str(event.new).lower() == "huber" else "piezo"
+        self._clear_preview()
+        if self._move_stack == "huber" and self.huber_calibration is None:
+            self._proposed.value = ("Huber click-to-move has no calibration yet — fit it in "
+                                    "Calibrate (with 'Huber' selected) for accuracy.")
+        else:
+            self._proposed.value = "click an image feature to preview a move ({})".format(
+                self._move_stack)
+
+    def _active_motors(self):
+        """The (x, y) motors of the currently-selected click-to-move stack.
+
+        Defaults to the primary stage.x/.y (the piezo); when 'huber' is selected and the Huber
+        group exists, uses stage.huber.x/.y.  Falls back to the primary axes otherwise.
+        """
+        if self._move_stack == "huber":
+            huber = getattr(self.stage, "huber", None)
+            if huber is not None and hasattr(huber, "x") and hasattr(huber, "y"):
+                return huber.x, huber.y
+        return self.stage.x, self.stage.y
+
+    def _active_calibration(self):
+        """The affine for the selected stack (Huber one when driving Huber, else the piezo)."""
+        if self._move_stack == "huber" and self.huber_calibration is not None:
+            return self.huber_calibration
+        return self.calibration
 
     def _move_axis(self, motor, target: float):
         """Move ``motor`` to ``target`` via the executor (interlock-gated) when present.
@@ -417,14 +466,15 @@ class InteractiveMode:
 
     def _commit(self, x: float, y: float) -> None:
         beam_px = self.beam.center
-        dm = self.calibration.click_to_motor_delta((x, y), beam_px)
+        dm = self._active_calibration().click_to_motor_delta((x, y), beam_px)
+        mx, my = self._active_motors()
         try:
-            target_x = float(self.stage.x.position) + float(dm[0])
-            target_y = float(self.stage.y.position) + float(dm[1])
-            self._move_axis(self.stage.x, target_x)
-            self._move_axis(self.stage.y, target_y)
+            target_x = float(mx.position) + float(dm[0])
+            target_y = float(my.position) + float(dm[1])
+            self._move_axis(mx, target_x)
+            self._move_axis(my, target_y)
             self._proposed.value = (
-                f"moving: x→{target_x:+.4f}, y→{target_y:+.4f}  "
+                f"moving [{self._move_stack}]: x→{target_x:+.4f}, y→{target_y:+.4f}  "
                 f"(press 'b' then a name + Enter to bookmark this spot)"
             )
         except Exception as exc:  # noqa: BLE001

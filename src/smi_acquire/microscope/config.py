@@ -58,8 +58,20 @@ class EpicsConfig(BaseModel):
 
 
 class CalibrationConfig(BaseModel):
-    # pixel = matrix @ motor + offset_implicit_from_beam_center
+    # pixel = matrix @ motor + offset_implicit_from_beam_center.
+    #
+    # The stacked stage needs TWO calibrations because the fine piezo (µm) and the coarse Huber
+    # stage (mm) have very different pixel/(motor-unit) scales: the click-to-move toggle picks
+    # the target stack AND its matrix.  ``matrix`` is the piezo calibration (kept as the default
+    # name for back-compat); ``huber_matrix`` is the Huber one.
+    #
+    # NOTE (rotation coupling, see Phase 6d): the piezo rides ON the Huber, so the piezo
+    # calibration is strictly only valid at the Huber orientation it was fit at — when the Huber
+    # theta/chi/phi change, the piezo px↔motor mapping rotates with them.  Capturing that
+    # orientation dependence is the deferred rotation-aware-click work; today each matrix is the
+    # at-fit affine and the user re-fits if the orientation changes materially.
     matrix: list[list[float]] = Field(default_factory=lambda: [[1.0, 0.0], [0.0, 1.0]])
+    huber_matrix: list[list[float]] = Field(default_factory=lambda: [[1.0, 0.0], [0.0, 1.0]])
 
 
 class UIConfig(BaseModel):

@@ -42,6 +42,11 @@ calibration:
     - 0.0
   - - 0.0
     - -100.0
+  huber_matrix:
+  - - -100.0
+    - 0.0
+  - - 0.0
+    - -100.0
 ui:
   poll_hz: 10.0
   motor_units: mm

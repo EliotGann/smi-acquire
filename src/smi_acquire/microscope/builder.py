@@ -187,6 +187,8 @@ def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=N
                                height_px=cfg.beam.height_px)
     beam_overlay.add_to(fig)
     calibration = CalibrationModel.from_config(cfg.calibration)
+    # Separate Huber affine for the coarse-stage click-to-move toggle (µm piezo vs mm Huber).
+    huber_calibration = CalibrationModel(cfg.calibration.huber_matrix)
 
     motor_panel = MotorPanel(stage, cfg, executor=executor)
     beam_panel = BeamPanel(cfg, beam_overlay)
@@ -194,7 +196,7 @@ def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=N
 
     dims = lambda: (stream.current_dims().width, stream.current_dims().height)
     interactive = InteractiveMode(fig, stage, beam_overlay, calibration, cfg, dims,
-                                  executor=executor)
+                                  executor=executor, huber_calibration=huber_calibration)
     polygon = AreaMode(fig, stage, beam_overlay, calibration, cfg, dims, bookmark_store=interactive)
     square = SquareScanMode(fig, stage, beam_overlay, calibration, cfg, dims, bookmark_store=interactive)
     linear = LinearScanMode(fig, stage, beam_overlay, calibration, cfg, dims, bookmark_store=interactive)

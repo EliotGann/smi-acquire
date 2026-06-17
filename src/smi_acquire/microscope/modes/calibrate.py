@@ -139,6 +139,12 @@ class CalibrateMode:
                 "image, then moves the stage ±step in x and ±step in y, and uses image "
                 "registration to fit the affine matrix."
             ),
+            pn.pane.Markdown(
+                "<span style='color:#888;font-size:12px'>Fits the <b>piezo</b> (primary x/y) "
+                "calibration. A separate <b>Huber</b> calibration + the piezo's rotation "
+                "coupling (it rides on the Huber θ/χ/φ) are the next alignment step "
+                "(per-stack Calibrate + rotation-aware click).</span>"
+            ),
             pn.Row(self._step_mm, self._settle_s),
             self._status,
             self._progress,
