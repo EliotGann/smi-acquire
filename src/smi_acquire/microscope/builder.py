@@ -160,12 +160,15 @@ class _NullMode:
     def tick_table(self): ...
 
 
-def build_microscope(cfg: AppConfig | None = None, *, executor=None) -> MicroscopeUI:
+def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=None) -> MicroscopeUI:
     """Construct the interactive microscope and return its embeddable pieces.
 
     ``executor`` is an optional :class:`smi_acquire.execute.Executor`; when given, the motor jog
-    panel routes moves through it (so they are interlock-gated against an external RunEngine).
-    Without one, the panel falls back to direct ophyd moves (standalone microscope).
+    panel + click-to-move route moves through it (so they are interlock-gated against an external
+    RunEngine).  ``interlock`` (an :class:`smi_acquire.interlock.Interlock`) additionally gates the
+    camera: focus/autofocus + exposure writes are locked out while a scan is running (the camera
+    stays passive: display only).  Without them the microscope falls back to direct ophyd moves
+    and unguarded camera writes (standalone use).
     """
     cfg = cfg or load_config()
     camera = Camera.from_config(cfg.epics, name="microscope")
@@ -190,11 +193,13 @@ def build_microscope(cfg: AppConfig | None = None, *, executor=None) -> Microsco
     status_bar = StatusBar(camera, stage)
 
     dims = lambda: (stream.current_dims().width, stream.current_dims().height)
-    interactive = InteractiveMode(fig, stage, beam_overlay, calibration, cfg, dims)
+    interactive = InteractiveMode(fig, stage, beam_overlay, calibration, cfg, dims,
+                                  executor=executor)
     polygon = AreaMode(fig, stage, beam_overlay, calibration, cfg, dims, bookmark_store=interactive)
     square = SquareScanMode(fig, stage, beam_overlay, calibration, cfg, dims, bookmark_store=interactive)
     linear = LinearScanMode(fig, stage, beam_overlay, calibration, cfg, dims, bookmark_store=interactive)
-    focus = FocusMode(fig, stage, beam_overlay, calibration, cfg, dims, camera_stream=stream)
+    focus = FocusMode(fig, stage, beam_overlay, calibration, cfg, dims, camera_stream=stream,
+                      interlock=interlock)
     calibrate = CalibrateMode(fig, stage, beam_overlay, calibration, cfg, dims, camera_stream=stream)
     modes = (interactive, polygon, square, linear, focus, calibrate)
 

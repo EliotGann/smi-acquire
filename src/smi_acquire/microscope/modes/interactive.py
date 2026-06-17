@@ -58,6 +58,7 @@ class InteractiveMode:
         calibration: CalibrationModel,
         cfg: AppConfig,
         image_size_hint_provider,
+        executor=None,
     ) -> None:
         self.fig = fig
         self.stage = stage
@@ -65,6 +66,7 @@ class InteractiveMode:
         self.calibration = calibration
         self.cfg = cfg
         self._dims = image_size_hint_provider
+        self.executor = executor
         self._active = False
 
         # ---- explore (click-to-move) state ----------------------------------------
@@ -403,14 +405,24 @@ class InteractiveMode:
             f"preview Δx={dm[0]:+.4f} {u}  Δy={dm[1]:+.4f} {u}  → click again to commit"
         )
 
+    def _move_axis(self, motor, target: float):
+        """Move ``motor`` to ``target`` via the executor (interlock-gated) when present.
+
+        Falls back to a direct ophyd ``set`` for the standalone microscope.  Raises on a busy
+        interlock (the caller surfaces the message), so a move can't fight an external RunEngine.
+        """
+        if self.executor is not None:
+            return self.executor.move_abs(motor, target)
+        return motor.set(target)
+
     def _commit(self, x: float, y: float) -> None:
         beam_px = self.beam.center
         dm = self.calibration.click_to_motor_delta((x, y), beam_px)
         try:
             target_x = float(self.stage.x.position) + float(dm[0])
             target_y = float(self.stage.y.position) + float(dm[1])
-            self.stage.x.set(target_x)
-            self.stage.y.set(target_y)
+            self._move_axis(self.stage.x, target_x)
+            self._move_axis(self.stage.y, target_y)
             self._proposed.value = (
                 f"moving: x→{target_x:+.4f}, y→{target_y:+.4f}  "
                 f"(press 'b' then a name + Enter to bookmark this spot)"
@@ -505,11 +517,13 @@ class InteractiveMode:
             return
         bm = self._bookmarks[sel[0]]
         try:
-            self.stage.x.set(bm.x)
-            self.stage.y.set(bm.y)
-            self.stage.z.set(bm.z)
-        except Exception:
-            pass
+            self._move_axis(self.stage.x, bm.x)
+            self._move_axis(self.stage.y, bm.y)
+            self._move_axis(self.stage.z, bm.z)
+        except Exception as exc:  # noqa: BLE001
+            # Surface an interlock lockout (or any move error) in the proposal line if present.
+            if hasattr(self, "_proposed"):
+                self._proposed.value = f"move failed: {exc}"
 
     def script_text(self) -> str:
         """Bookmark list-scan plan for the persistent script panel. Drops references."""

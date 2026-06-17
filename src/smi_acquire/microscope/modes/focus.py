@@ -100,6 +100,7 @@ class FocusMode:
         cfg: AppConfig,
         image_size_hint_provider,
         camera_stream: CameraStream,
+        interlock=None,
     ) -> None:
         self.fig = fig
         self.stage = stage
@@ -108,6 +109,7 @@ class FocusMode:
         self.cfg = cfg
         self._dims = image_size_hint_provider
         self._stream = camera_stream
+        self.interlock = interlock
         self._active = False
         self._running = False
         self._cancel_requested = False
@@ -230,8 +232,23 @@ class FocusMode:
 
     # ---- handlers ------------------------------------------------------------------
 
+    def _locked(self) -> str:
+        """Return the interlock banner if an external RunEngine is busy, else ''.
+
+        Focus moves z AND writes the camera exposure, so it is locked out while the beamline
+        RunEngine is running (camera stays passive: display only).
+        """
+        il = self.interlock
+        if il is not None and il.is_busy():
+            return il.banner()
+        return ""
+
     def _on_start(self, _event) -> None:
         if self._running:
+            return
+        locked = self._locked()
+        if locked:
+            self._status.value = "🔒 " + locked
             return
         self._running = True
         self._cancel_requested = False
@@ -254,6 +271,10 @@ class FocusMode:
     def _on_goto_best(self, _event) -> None:
         if self._best_z is None:
             return
+        locked = self._locked()
+        if locked:
+            self._status.value = "🔒 " + locked
+            return
         try:
             self.stage.z.set(self._best_z)
         except Exception as exc:  # noqa: BLE001
@@ -268,6 +289,10 @@ class FocusMode:
         Sets the focus-search settle time to 1.5× the new exposure so we always wait for a
         fresh frame after each motor move.
         """
+        locked = self._locked()
+        if locked:
+            self._exposure_status.value = "🔒 " + locked
+            return
         gray = self._stream.grab_gray()
         if gray is None:
             self._exposure_status.value = "no image — can't optimize exposure"

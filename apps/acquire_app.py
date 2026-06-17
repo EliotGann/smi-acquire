@@ -479,7 +479,7 @@ class AcquireApp:
             return
         try:
             from smi_acquire.microscope.builder import build_microscope
-            ui = build_microscope(executor=self.executor)
+            ui = build_microscope(executor=self.executor, interlock=self.interlock)
             self.micro = ui
             # Fold the capture-position controls into the microscope's Move tab (combined
             # with the bookmark list — they were redundant as a separate panel).
