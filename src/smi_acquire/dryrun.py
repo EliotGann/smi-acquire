@@ -24,11 +24,11 @@ from typing import List, Optional
 from .spec import ExperimentSpec
 from . import codegen
 
-# Where to find the smi_plans package off-beamline (best-effort; the env may already have it).
+# Where to find the smi_plans package off-beamline (best-effort; the env normally has it as an
+# editable install). Fallback points at OUR checkout (egann's is not group-readable).
 _SMI_PLANS_DIRS = [
     os.environ.get("SMI_PLANS_PATH", ""),
-    "/nsls2/users/egann/git/smi/smi-plans/src",
-    "/nsls2/users/egann/git/smi/scripts/SWAXS_user_scripts/templates",
+    "/home/xf12id/git/smi/smi-plans/src",
 ]
 
 
@@ -113,12 +113,44 @@ def dry_run(spec: ExperimentSpec) -> DryRunReport:
 
     _inject(sim)
 
-    collected = {"msgs": []}
+    # Drive the generated plan through a REAL RunEngine and assert on emitted DOCUMENTS.
+    #
+    # The smi_plans plans are message-pure (they use ``bps.rd`` / ``bps.mv``), so a bare
+    # ``list(plan)`` CANNOT answer ``rd``/``read`` messages -- it returns the default (0), which
+    # makes read-and-branch loops (the temperature/flux equilibration in ``_compose``) spin
+    # forever.  This mirrors ``smi-plans/tests/conftest.py``: a RunEngine feeds readbacks back
+    # into the generator; ``bps.sleep`` is made instant so settle/soak waits don't block; manual
+    # ``input`` prompts are answered non-interactively; runs/events are counted from documents.
+    from collections import Counter
+    import builtins
+    import bluesky.plan_stubs as _bps
+    from unittest import mock
+    from bluesky import RunEngine
+
+    docs: List[tuple] = []
 
     def _RE(plan):
-        msgs = list(plan)
-        collected["msgs"] = msgs
-        return msgs
+        RE = RunEngine({})
+        RE.subscribe(lambda name, doc: docs.append((name, doc)))
+
+        def _instant_sleep(t):
+            yield from _bps.null()
+
+        with mock.patch.object(_bps, "sleep", _instant_sleep), \
+                mock.patch.object(builtins, "input", lambda prompt="": ""):
+            RE(plan)
+        return docs
+
+    def _count(document_list):
+        names = [n for n, _ in document_list]
+        opens, closes = names.count("start"), names.count("stop")
+        stream = {d["uid"]: d.get("name", "primary")
+                  for n, d in document_list if n == "descriptor"}
+        ev = Counter()
+        for n, d in document_list:
+            if n == "event":
+                ev[stream.get(d["descriptor"], "primary")] += 1
+        return opens, closes, ev.get("primary", 0)
 
     ns = dict(sim.globals_dict())
     ns["RE"] = _RE
@@ -129,9 +161,7 @@ def dry_run(spec: ExperimentSpec) -> DryRunReport:
         with _w.catch_warnings(record=True) as caught:
             _w.simplefilter("always")
             exec(compile(script, "<generated>", "exec"), ns)  # noqa: S102 (sandboxed sim)
-        msgs = collected["msgs"]
-        o, c = sim.run_count(msgs)
-        events = sim.primary_events(msgs)
+        o, c, events = _count(docs)
         warns = list(spec_warnings)
         for w in caught:
             warns.append(str(w.message))

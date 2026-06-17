@@ -477,6 +477,8 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zlib-ng-2.3.3-hceb46e0_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zstandard-0.25.0-py311haee01d2_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/zstd-1.5.7-hb78ec9c_6.conda
+      - pypi: https://files.pythonhosted.org/packages/13/b5/3515126cb6dce557cb928cc3147a77d5f84b9cade3c8548b802792e6bbe4/redis_json_dict-0.2.2-py3-none-any.whl
+      - pypi: ../smi-plans
       - pypi: ./
 packages:
 - conda: https://conda.anaconda.org/conda-forge/linux-64/_openmp_mutex-4.5-20_gnu.conda
@@ -5806,6 +5808,24 @@ packages:
   purls: []
   size: 345073
   timestamp: 1765813471974
+- pypi: https://files.pythonhosted.org/packages/13/b5/3515126cb6dce557cb928cc3147a77d5f84b9cade3c8548b802792e6bbe4/redis_json_dict-0.2.2-py3-none-any.whl
+  name: redis-json-dict
+  version: 0.2.2
+  sha256: 3654918541ebc0b5f77bf8aa7626217af3325f3f5451d9391c2d8cd35974decd
+  requires_dist:
+  - orjson>=3.9
+  - redis>=5.0
+  - pre-commit ; extra == 'dev'
+  - pytest-cov>=3 ; extra == 'dev'
+  - pytest>=6 ; extra == 'dev'
+  - furo>=2023.8.17 ; extra == 'docs'
+  - myst-parser>=0.13 ; extra == 'docs'
+  - sphinx-autodoc-typehints ; extra == 'docs'
+  - sphinx-copybutton ; extra == 'docs'
+  - sphinx>=7.0 ; extra == 'docs'
+  - pytest-cov>=3 ; extra == 'test'
+  - pytest>=6 ; extra == 'test'
+  requires_python: '>=3.8'
 - conda: https://conda.anaconda.org/conda-forge/noarch/redis-py-8.0.0-pyhd8ed1ab_0.conda
   sha256: 7ea3e64c86688e6cfa7b85449de3355662a951fcf45c110592b84b7341e92ae1
   md5: 769fe016eae8eda89773645d7559b5b0
@@ -6100,6 +6120,24 @@ packages:
   - bluesky ; extra == 'beamline'
   - pytest ; extra == 'test'
   requires_python: '>=3.10'
+- pypi: ../smi-plans
+  name: smi-plans
+  version: 0.1.0
+  sha256: f754b76aa5c559b62337e3a221702a8fa751d2f300d93835a8614a3ae5f1eea9
+  requires_dist:
+  - bluesky ; extra == 'beamline'
+  - ophyd ; extra == 'beamline'
+  - numpy ; extra == 'beamline'
+  - pytest ; extra == 'test'
+  - bluesky ; extra == 'test'
+  - ophyd ; extra == 'test'
+  - numpy ; extra == 'test'
+  - pytest ; extra == 'dev'
+  - bluesky ; extra == 'dev'
+  - ophyd ; extra == 'dev'
+  - numpy ; extra == 'dev'
+  - ruff ; extra == 'dev'
+  requires_python: '>=3.7'
 - conda: https://conda.anaconda.org/conda-forge/linux-64/snappy-1.2.2-h03e3b7b_1.conda
   sha256: 48f3f6a76c34b2cfe80de9ce7f2283ecb55d5ed47367ba91e8bb8104e12b8f11
   md5: 98b6c9dc80eb87b2519b97bcf7e578dd

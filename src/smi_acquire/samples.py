@@ -26,11 +26,12 @@ import os
 import sys
 import warnings
 
-# Default on-disk location of the smi_plans templates package at the beamline / your repo.
+# Default on-disk location of the smi_plans package (src dir) at the beamline / your repo.
+# smi_plans is normally a proper editable install (see pixi.toml); these are fallbacks only,
+# pointing at OUR checkout (egann's path is not group-readable).
 _DEFAULT_TEMPLATES_DIRS = [
     os.environ.get("SMI_PLANS_PATH", ""),
-    "/nsls2/users/egann/git/smi/scripts/SWAXS_user_scripts/templates",
-    "/home/xf12id/SWAXS_user_scripts/templates",
+    "/home/xf12id/git/smi/smi-plans/src",
 ]
 
 #: Set once we know how a downstream script should reach smi_plans (used by codegen).

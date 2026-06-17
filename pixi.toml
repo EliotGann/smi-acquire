@@ -28,12 +28,21 @@ ruff = "*"
 
 [pypi-dependencies]
 smi-acquire = { path = ".", editable = true }
+# The sibling smi-plans package: the source of truth for the Sample/SampleStore model and the
+# composable acquisition plans this app generates. Editable so edits to ../smi-plans are live.
+smi-plans = { path = "../smi-plans", editable = true }
+# Redis-backed sample store: db=2 'swaxssamples' (shared bus with the beamline; see
+# ../smi-plans/docs/SAMPLE_SYSTEM_PLAN.md). `redis` is pulled in transitively; the JSON dict
+# wrapper the store uses is not, so request it explicitly.
+redis-json-dict = "*"
 
 [activation.env]
 # Keep the env hermetic (ignore ~/.local site-packages that would shadow conda deps).
 PYTHONNOUSERSITE = "1"
-# Where the smi_plans package lives (codegen targets it; dry-run imports it).
-SMI_PLANS_PATH = "/nsls2/users/egann/git/smi/smi-plans/src"
+# Where the smi_plans package lives (codegen targets it; dry-run imports it). This is OUR
+# checkout (egann's is not group-readable). smi_plans is also pip-installed editable above, so
+# this is now only a fallback/explicit hint for the codegen + samples bridge.
+SMI_PLANS_PATH = "../smi-plans/src"
 # Point the vendored microscope at the bundled fake-IOC config.
 BEAM_IMAGE_CONFIG = "config/microscope.yaml"
 
