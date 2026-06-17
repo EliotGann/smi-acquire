@@ -316,9 +316,13 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
 # ---------------------------------------------------------------------------
 # project-level: render one experiment over its target subset
 # ---------------------------------------------------------------------------
-def render_experiment(project, experiment, **kwargs) -> str:
-    """Render one :class:`~smi_acquire.project.Experiment` over its Project target subset."""
-    return render(project.experiment_spec(experiment), **kwargs)
+def render_experiment(project, experiment, store, **kwargs) -> str:
+    """Render one :class:`~smi_acquire.project.Experiment` over its target subset.
+
+    ``store`` is an :class:`smi_acquire.store.AcquireStore`; the experiment's target is resolved
+    against the shared sample store to produce the sample rows.
+    """
+    return render(project.experiment_spec(experiment, store), **kwargs)
 
 
 # ---------------------------------------------------------------------------

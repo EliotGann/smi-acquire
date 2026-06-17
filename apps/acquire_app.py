@@ -30,8 +30,8 @@ import panel as pn
 
 from smi_acquire import interview, codegen, dryrun, registry
 from smi_acquire.interview import axis_param_schema, default_axis, reorder_axes_by_speed
-from smi_acquire.project import (Project, Sample, Bookmark, Position,
-                                 Experiment, Target)
+from smi_acquire.project import Project, Experiment, Target, Reference
+from smi_acquire.store import AcquireStore
 
 pn.extension("tabulator", "codeeditor", sizing_mode="stretch_width", notifications=True)
 
@@ -85,24 +85,34 @@ def _toast(msg, kind="info"):
 # ===========================================================================
 class AcquireApp:
     def __init__(self):
-        self.project = Project(name="")
+        self.store = AcquireStore.connect()    # live redis db=2 (auto-falls back offline)
+        self.project = Project(name="")        # local: recipes + references only
         self.micro = None                 # MicroscopeUI (lazy: needs the IOC)
         self.current_exp: Experiment | None = None
+        self._spine_ids: list[str] = []   # store sample ids, parallel to the spine df rows
         self._build()
 
     # -- microscope marker sync --------------------------------------------
     def sync_markers(self):
-        """Push the Project's visible markers (positioned samples + references) onto the image."""
+        """Push markers onto the image: positioned store samples (lime) + local references (yellow)."""
         if self.micro is None:
             return
         from smi_acquire.microscope.scripts import Bookmark as MBookmark
         inter = self.micro.interactive
         bms, mab = [], []
-        for m in self.project.visible_markers():
-            p = m.position
-            bms.append(MBookmark(name=m.name, x=p.x or 0.0, y=p.y or 0.0, z=p.z or 0.0,
-                                 is_reference=(m.kind == "reference")))
-            mab.append((p.x or 0.0, p.y or 0.0, p.z or 0.0))
+        for s in self.store.list_samples():
+            xyz = self._sample_xyz(s)
+            if xyz is None:
+                continue
+            x, y, z = xyz
+            bms.append(MBookmark(name=s.name, x=x, y=y, z=z, is_reference=False))
+            mab.append((x, y, z))
+        for r in self.project.references:
+            if not r.visible:
+                continue
+            x, y, z = (r.x or 0.0), (r.y or 0.0), (r.z or 0.0)
+            bms.append(MBookmark(name=r.name, x=x, y=y, z=z, is_reference=True))
+            mab.append((x, y, z))
         inter._bookmarks = bms            # noqa: SLF001 (intentional bridge into vendored mode)
         inter._motor_at_bookmark = mab    # noqa: SLF001
         try:
@@ -111,29 +121,50 @@ class AcquireApp:
         except Exception:
             pass
 
-    # -- live stage position -----------------------------------------------
-    def stage_position(self) -> Position:
+    @staticmethod
+    def _sample_xyz(sample):
+        """The x/y/z (piezo, stage fallback) of a sample's runnable position, or None if unpositioned."""
+        p = sample.runnable_position()
+        x = p.piezo_x if p.piezo_x is not None else p.stage_x
+        y = p.piezo_y if p.piezo_y is not None else p.stage_y
+        z = p.piezo_z if p.piezo_z is not None else p.stage_z
+        if x is None and y is None and z is None:
+            return None
+        return (x or 0.0, y or 0.0, z or 0.0)
+
+    @staticmethod
+    def _is_positioned(sample):
+        """True if any piezo_*/stage_* axis of the sample's runnable position is set."""
+        p = sample.runnable_position()
+        return any(getattr(p, a) is not None for a in
+                   ("piezo_x", "piezo_y", "piezo_z", "piezo_th",
+                    "stage_x", "stage_y", "stage_z",
+                    "stage_theta", "stage_chi", "stage_phi"))
+
+    # -- live stage axes (microscope reading) ------------------------------
+    def _stage_axes(self) -> dict:
+        """A dict of the axes the microscope exposes today: ``{"x":.., "y":.., "z":..}``."""
         if self.micro is None:
-            return Position()
+            return {}
         s = self.micro.stage
         try:
-            return Position(round(float(s.x.position), 4), round(float(s.y.position), 4),
-                            round(float(s.z.position), 4))
+            return {"x": round(float(s.x.position), 4),
+                    "y": round(float(s.y.position), 4),
+                    "z": round(float(s.z.position), 4)}
         except Exception:
-            return Position()
+            return {}
 
     # ==================================================================
-    # THE SPINE (persistent sidebar)
+    # THE SPINE (persistent sidebar) — samples FROM THE SHARED STORE
     # ==================================================================
     def _build_spine(self):
         self.spine = pn.widgets.Tabulator(
             value=self._spine_df(), show_index=False, selectable=1, height=320, theme="simple",
-            widths={"name": 110, "sets": 90, "x": 64, "y": 64, "z": 56, "incidence": 80,
-                    "vis": 40, "exp": 36, "md": 120},
-            editors={"name": {"type": "input"}, "sets": {"type": "input"},
-                     "incidence": {"type": "input"}, "vis": {"type": "tickCross"},
-                     "md": {"type": "input"}, "x": None, "y": None, "z": None, "exp": None},
-            formatters={"vis": {"type": "tickCross"}},
+            widths={"name": 110, "holder": 90, "x": 60, "y": 60, "z": 52, "incidence": 80,
+                    "active": 50, "md": 120},
+            editors={"name": {"type": "input"}, "holder": {"type": "input"},
+                     "incidence": {"type": "input"}, "md": {"type": "input"},
+                     "x": None, "y": None, "z": None, "active": None},
         )
         self.spine.on_edit(self._on_spine_edit)
 
@@ -141,13 +172,16 @@ class AcquireApp:
         add.on_click(self._on_add_blank)
         rm = pn.widgets.Button(name="✕ remove selected", button_type="danger", width=140)
         rm.on_click(self._on_remove_selected)
+        load = pn.widgets.Button(name="◆ load (set active)", button_type="primary", width=160)
+        load.on_click(self._on_set_active)
 
-        new_set = pn.widgets.TextInput(placeholder="new set name…", width=130)
-        mk_set = pn.widgets.Button(name="+ set", width=60)
-        mk_set.on_click(lambda _e: self._make_set(new_set))
-        self.assign_set = pn.widgets.Select(options=self._set_options(), width=130)
-        assign_btn = pn.widgets.Button(name="→ add sel. to set", width=130)
-        assign_btn.on_click(self._on_assign_set)
+        # Holders sub-panel (replaces the old "Sets").
+        new_holder = pn.widgets.TextInput(placeholder="new holder name…", width=130)
+        mk_holder = pn.widgets.Button(name="+ holder", width=80)
+        mk_holder.on_click(lambda _e: self._make_holder(new_holder))
+        self.move_holder = pn.widgets.Select(options=self._holder_options(), width=140)
+        move_btn = pn.widgets.Button(name="→ move sel. to holder", width=170)
+        move_btn.on_click(self._on_move_holder)
 
         imp = pn.widgets.FileInput(accept=".csv", name="import")
         imp.param.watch(self._on_import_csv, "value")
@@ -158,135 +192,209 @@ class AcquireApp:
         load_json = pn.widgets.FileInput(accept=".json", name="load project")
         load_json.param.watch(self._on_load_json, "value")
 
+        self.store_status = pn.pane.Markdown("")
+        self._refresh_store_status()
         self.spine_count = pn.pane.Markdown("")
         self._refresh_spine_count()
         self.spine_panel = pn.Column(
             pn.pane.Markdown("### Sample list"),
+            self.store_status,
             self.spine_count,
             self.spine,
             pn.Row(add, rm),
+            pn.Row(load),
             pn.layout.Divider(),
-            pn.pane.Markdown("**Sets**"),
-            pn.Row(new_set, mk_set),
-            pn.Row(self.assign_set, assign_btn),
+            pn.pane.Markdown("**Holders**"),
+            pn.Row(new_holder, mk_holder),
+            pn.Row(self.move_holder, move_btn),
             pn.layout.Divider(),
             pn.pane.Markdown("**Import / export**"),
             pn.Row(imp),
             pn.Row(self.export_csv, self.export_json),
-            pn.Row(pn.pane.Markdown("load project:"), load_json),
+            pn.Row(pn.pane.Markdown("project recipes:"), load_json),
         )
 
     def _spine_df(self):
-        set_name = {g.id: g.name for g in self.project.sample_sets}
-        exp_count = {s.id: 0 for s in self.project.samples}
-        for e in self.project.experiments:
-            for s in self.project.resolve_target(e):
-                exp_count[s.id] = exp_count.get(s.id, 0) + 1
+        active = self.store.active_sample()
+        active_id = active.id if active is not None else None
+        self._spine_ids = []
         rows = []
-        for s in self.project.samples:
+        for s in self.store.list_samples():
+            self._spine_ids.append(s.id)
+            holder = self.store.holder_by_id(s.holder_id) if s.holder_id else None
+            p = s.nominal
+            x = p.piezo_x if p.piezo_x is not None else p.stage_x
+            y = p.piezo_y if p.piezo_y is not None else p.stage_y
+            z = p.piezo_z if p.piezo_z is not None else p.stage_z
+            angles = s.incident_angles or p.incident_angles
             rows.append({
                 "name": s.name,
-                "sets": ", ".join(set_name.get(g, "?") for g in s.set_ids),
-                "x": s.position.x, "y": s.position.y, "z": s.position.z,
-                "incidence": _fmt_floatlist(s.incident_angles),
-                "vis": bool(s.visible),
-                "exp": exp_count.get(s.id, 0),
-                "md": json.dumps(s.metadata) if s.metadata else "",
+                "holder": holder.name if holder is not None else "",
+                "x": x, "y": y, "z": z,
+                "incidence": _fmt_floatlist(angles),
+                "active": "◆" if s.id == active_id else "",
+                "md": json.dumps(s.md) if s.md else "",
             })
         return pd.DataFrame(
-            rows, columns=["name", "sets", "x", "y", "z", "incidence", "vis", "exp", "md"])
+            rows, columns=["name", "holder", "x", "y", "z", "incidence", "active", "md"])
 
     def refresh_spine(self):
         self.spine.value = self._spine_df()
-        self.assign_set.options = self._set_options()
+        self.move_holder.options = self._holder_options()
+        if hasattr(self, "capture_holder"):
+            self.capture_holder.options = self._holder_options()
+        self._refresh_store_status()
         self._refresh_spine_count()
         if hasattr(self, "target_select"):
             self.target_select.options = self._target_options()
         self.sync_markers()
 
+    def _refresh_store_status(self):
+        if self.store.live:
+            self.store_status.object = ("<span style='color:#2e7d32'>● live: {}</span>"
+                                        .format(self.store.location))
+        else:
+            self.store_status.object = ("<span style='color:#b26a00'>○ {}</span>"
+                                        .format(self.store.location))
+
     def _refresh_spine_count(self):
-        n = len(self.project.samples)
-        pos = sum(1 for s in self.project.samples if s.has_position())
-        self.spine_count.object = ("**{}** samples · {} positioned · {} sets · {} experiments"
-                                   .format(n, pos, len(self.project.sample_sets),
+        samples = self.store.list_samples()
+        n = len(samples)
+        pos = sum(1 for s in samples if self._is_positioned(s))
+        self.spine_count.object = ("**{}** samples · {} positioned · {} holders · {} experiments"
+                                   .format(n, pos, len(self.store.list_holders()),
                                            len(self.project.experiments)))
 
-    def _set_options(self):
-        return {"(pick set)": None, **{g.name: g.id for g in self.project.sample_sets}}
+    def _holder_options(self):
+        return {"(pick holder)": None,
+                **{h.name: h.id for h in self.store.list_holders()}}
 
     def _selected_sample(self):
         sel = list(self.spine.selection or [])
-        if not sel or sel[0] >= len(self.project.samples):
+        if not sel or sel[0] >= len(self._spine_ids):
             return None
-        return self.project.samples[sel[0]]
+        return self.store.sample_by_id(self._spine_ids[sel[0]])
 
     def _on_spine_edit(self, event):
         i = int(getattr(event, "row", -1))
         col = getattr(event, "column", None)
         val = getattr(event, "value", None)
-        if not (0 <= i < len(self.project.samples)):
+        if not (0 <= i < len(self._spine_ids)):
             return
-        s = self.project.samples[i]
+        s = self.store.sample_by_id(self._spine_ids[i])
+        if s is None:
+            return
         if col == "name":
             s.name = str(val).strip() or s.name
-        elif col == "sets":
-            s.set_ids = [self.project.ensure_set(n.strip()).id
-                         for n in str(val or "").split(",") if n.strip()]
+            self.store.update_sample(s)
+        elif col == "holder":
+            name = str(val or "").strip()
+            if name:
+                holder = self.store.ensure_holder(name)
+                self.store.set_sample_holder(s.id, holder.id)
         elif col == "incidence":
-            s.incident_angles = _parse_floatlist(val)
-        elif col == "vis":
-            s.visible = bool(val)
+            angles = _parse_floatlist(val)
+            s.incident_angles = angles
+            s.nominal.incident_angles = list(angles)
+            self.store.update_sample(s)
         elif col == "md":
             try:
-                s.metadata = json.loads(val) if str(val).strip() else {}
+                s.md = json.loads(val) if str(val).strip() else {}
+                self.store.update_sample(s)
             except Exception:
                 _toast("metadata must be JSON", "warning")
         self.refresh_spine()
 
     def _on_add_blank(self, _e):
-        self.project.samples.append(Sample(name=self._next_name()))
+        self.store.add_sample(self._next_name())
         self.refresh_spine()
 
     def _on_remove_selected(self, _e):
         s = self._selected_sample()
         if s is not None:
-            self.project.samples.remove(s)
+            self.store.delete_sample(s.id)
             self.spine.selection = []
             self.refresh_spine()
 
+    def _on_set_active(self, _e):
+        s = self._selected_sample()
+        if s is None:
+            _toast("select a sample row in the sidebar first", "warning")
+            return
+        self.store.set_active_sample(s.id)
+        self.refresh_spine()
+        _toast("active sample set to intent — load '{}' from beamline session".format(s.name))
+
     def _next_name(self):
-        existing = {s.name for s in self.project.samples}
+        existing = {s.name for s in self.store.list_samples()}
         i = 1
         while "sample{}".format(i) in existing:
             i += 1
         return "sample{}".format(i)
 
-    def _make_set(self, name_input):
+    def _make_holder(self, name_input):
         name = (name_input.value or "").strip()
         if name:
-            self.project.ensure_set(name)
+            self.store.ensure_holder(name)
             name_input.value = ""
             self.refresh_spine()
 
-    def _on_assign_set(self, _e):
+    def _on_move_holder(self, _e):
         s = self._selected_sample()
-        sid = self.assign_set.value
-        if s is not None and sid and sid not in s.set_ids:
-            s.set_ids.append(sid)
+        hid = self.move_holder.value
+        if s is not None and hid:
+            self.store.set_sample_holder(s.id, hid)
             self.refresh_spine()
 
     def _on_import_csv(self, _e):
         if not self.spine.disabled and getattr(_e, "new", None):
             try:
                 df = pd.read_csv(io.BytesIO(_e.new))
-                self.project = Project.from_dataframe(df, name=self.project.name)
+                n = self._import_samples_df(df)
                 self.refresh_spine()
-                _toast("imported {} samples".format(len(self.project.samples)))
+                _toast("imported {} samples".format(n))
             except Exception as exc:
                 _toast("import failed: {}".format(exc), "error")
 
+    def _import_samples_df(self, df):
+        """Create store samples from a (tolerant) CSV. Coords -> nominal via position_from_axes."""
+        coord_cols = {"x", "y", "z", "piezo_x", "piezo_y", "piezo_z", "piezo_th",
+                      "stage_x", "stage_y", "stage_z", "stage_theta", "stage_chi", "stage_phi",
+                      "nominal_piezo_x", "nominal_piezo_y", "nominal_piezo_z", "nominal_piezo_th",
+                      "nominal_stage_x", "nominal_stage_y", "nominal_stage_z",
+                      "nominal_stage_theta", "nominal_stage_chi", "nominal_stage_phi"}
+        cols = list(df.columns)
+        n = 0
+        for _, r in df.iterrows():
+            name = str(r["name"]).strip() if "name" in cols and pd.notna(r.get("name")) else None
+            if not name:
+                name = self._next_name()
+            holder_id = None
+            if "holder" in cols and pd.notna(r.get("holder")):
+                holder_id = self.store.ensure_holder(str(r["holder"]).strip()).id
+            axes = {}
+            for c in coord_cols:
+                if c in cols and pd.notna(r.get(c)):
+                    key = c[len("nominal_"):] if c.startswith("nominal_") else c
+                    try:
+                        axes[key] = float(r[c])
+                    except (TypeError, ValueError):
+                        pass
+            nominal = AcquireStore.position_from_axes(axes) if axes else None
+            angles = _parse_floatlist(r["incident_angles"]) if (
+                "incident_angles" in cols and pd.notna(r.get("incident_angles"))) else []
+            md = {}
+            for c in cols:
+                if c.startswith("md.") and pd.notna(r.get(c)):
+                    md[c[len("md."):]] = r[c]
+            self.store.add_sample(name, holder_id=holder_id, nominal=nominal,
+                                  incident_angles=angles, md=md)
+            n += 1
+        return n
+
     def _export_csv(self):
-        return io.BytesIO(self.project.to_dataframe().to_csv(index=False).encode())
+        samples_rows, _scans = self.store.store.export_tables()
+        return io.BytesIO(pd.DataFrame(samples_rows).to_csv(index=False).encode())
 
     def _export_json(self):
         return io.BytesIO(json.dumps(self.project.to_dict(), indent=2).encode())
@@ -298,7 +406,8 @@ class AcquireApp:
                 self.current_exp = None
                 self.refresh_spine()
                 self._refresh_experiment_list()
-                _toast("loaded project")
+                _toast("loaded project recipes ({} experiments)".format(
+                    len(self.project.experiments)))
             except Exception as exc:
                 _toast("load failed: {}".format(exc), "error")
 
@@ -314,6 +423,8 @@ class AcquireApp:
         self.capture_name = pn.widgets.TextInput(
             name="name", placeholder="sample name", width=160,
             css_classes=["bookmark-name"])
+        self.capture_holder = pn.widgets.Select(
+            name="onto holder", options=self._holder_options(), width=160)
         new_btn = pn.widgets.Button(name="★ new sample here", button_type="primary", width=160)
         new_btn.on_click(self._on_new_here)
         assign_btn = pn.widgets.Button(name="assign → selected", width=160)
@@ -329,11 +440,12 @@ class AcquireApp:
             pn.pane.Markdown("### Capture position\nMove with the image, then:"),
             self.pos_readout,
             self.capture_name,
+            self.capture_holder,
             pn.Row(new_btn, assign_btn),
             pn.Row(ref_btn, sync_btn),
             pn.pane.Markdown(
-                "<span style='color:#777;font-size:12px'>Positioned, visible samples show as "
-                "lime markers; references as yellow. Use the **Scan** tabs for line/grid/"
+                "<span style='color:#777;font-size:12px'>Positioned samples show as "
+                "lime markers; visible references as yellow. Use the **Scan** tabs for line/grid/"
                 "polygon alignment.</span>"),
             sizing_mode="stretch_width",
         )
@@ -361,14 +473,16 @@ class AcquireApp:
                 "reload.".format(exc), alert_type="warning"))
 
     def _refresh_pos(self):
-        p = self.stage_position()
-        if p.is_set():
-            self.pos_readout.object = "position: **x {} · y {} · z {}**".format(p.x, p.y, p.z)
+        ax = self._stage_axes()
+        if ax:
+            self.pos_readout.object = "position: **x {} · y {} · z {}**".format(
+                ax.get("x"), ax.get("y"), ax.get("z"))
 
     def _on_new_here(self, _e):
-        p = self.stage_position()
         name = (self.capture_name.value or "").strip() or self._next_name()
-        self.project.new_sample_from(name, p)
+        holder_id = self.capture_holder.value if hasattr(self, "capture_holder") else None
+        self.store.add_sample(name, holder_id=holder_id,
+                              nominal=AcquireStore.position_from_axes(self._stage_axes()))
         self.capture_name.value = ""
         self.refresh_spine()
         _toast("added sample '{}'".format(name))
@@ -378,14 +492,16 @@ class AcquireApp:
         if s is None:
             _toast("select a sample row in the sidebar first", "warning")
             return
-        self.project.assign_position(s.id, self.stage_position())
+        self.store.assign_nominal(s.id, AcquireStore.position_from_axes(self._stage_axes()))
         self.refresh_spine()
         _toast("positioned '{}'".format(s.name))
 
     def _on_ref_here(self, _e):
-        p = self.stage_position()
-        name = (self.capture_name.value or "").strip() or "ref{}".format(len(self.project.references) + 1)
-        self.project.references.append(Bookmark(name=name, position=p, kind="reference"))
+        ax = self._stage_axes()
+        name = (self.capture_name.value or "").strip() or "ref{}".format(
+            len(self.project.references) + 1)
+        self.project.references.append(
+            Reference(name=name, x=ax.get("x"), y=ax.get("y"), z=ax.get("z")))
         self.capture_name.value = ""
         self.refresh_spine()
         _toast("added reference '{}'".format(name))
@@ -409,7 +525,7 @@ class AcquireApp:
         self.report = pn.pane.Markdown("")
 
         self.plan = pn.Column(
-            pn.pane.Markdown("## Build a scan recipe → target a sample-set"),
+            pn.pane.Markdown("## Build a scan recipe → target a holder"),
             pn.Row(self.exp_select, new_exp, del_exp),
             self.editor_box,
             pn.layout.Divider(),
@@ -428,7 +544,8 @@ class AcquireApp:
 
     def _target_options(self):
         opts = {"(all samples)": "all"}
-        opts.update({"set: " + g.name: "set:" + g.id for g in self.project.sample_sets})
+        opts.update({"holder: " + h.name: "holder:" + h.id
+                     for h in self.store.list_holders()})
         return opts
 
     def _refresh_experiment_list(self):
@@ -498,13 +615,13 @@ class AcquireApp:
         self._render_script()
 
     def _target_value(self, t: Target):
-        if t.kind == "set" and t.set_id:
-            return "set:" + t.set_id
+        if t.kind == "holder" and t.holder_id:
+            return "holder:" + t.holder_id
         return "all"
 
     def _parse_target(self, val):
-        if val and val.startswith("set:"):
-            return Target(kind="set", set_id=val[4:])
+        if val and val.startswith("holder:"):
+            return Target(kind="holder", holder_id=val[len("holder:"):])
         return Target(kind="all")
 
     # ---- concern cards (operate on the current Experiment) ------------
@@ -732,7 +849,7 @@ class AcquireApp:
             self.code.value = ""
             return
         try:
-            self.code.value = codegen.render_experiment(self.project, e)
+            self.code.value = codegen.render_experiment(self.project, e, self.store)
         except Exception as exc:
             self.code.value = "# ERROR: {}".format(exc)
 
@@ -742,9 +859,9 @@ class AcquireApp:
             self.report.object = "_No experiment selected._"
             return
         self._render_script()
-        rep = dryrun.dry_run_experiment(self.project, e)
-        targeted = self.project.resolve_target(e)
-        unpos = [s.name for s in targeted if not s.has_position()]
+        rep = dryrun.dry_run_experiment(self.project, e, self.store)
+        targeted = self.project.resolve_target(e, self.store)
+        unpos = [s.name for s in targeted if not self._is_positioned(s)]
         lines = ["### {}".format(rep.summary()),
                  "_targets {} sample(s)_".format(len(targeted))]
         if unpos:

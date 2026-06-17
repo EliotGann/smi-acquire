@@ -178,9 +178,13 @@ def dry_run(spec: ExperimentSpec) -> DryRunReport:
 __all__ = ["DryRunReport", "dry_run"]
 
 
-def dry_run_experiment(project, experiment) -> DryRunReport:
-    """Dry-run one :class:`~smi_acquire.project.Experiment` over its Project target subset."""
-    return dry_run(project.experiment_spec(experiment))
+def dry_run_experiment(project, experiment, store) -> DryRunReport:
+    """Dry-run one :class:`~smi_acquire.project.Experiment` over its target subset.
+
+    ``store`` is an :class:`smi_acquire.store.AcquireStore`; the target is resolved against the
+    shared sample store.
+    """
+    return dry_run(project.experiment_spec(experiment, store))
 
 
 __all__ = ["DryRunReport", "dry_run", "dry_run_experiment"]

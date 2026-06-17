@@ -10,8 +10,10 @@ click-to-move, bookmarks, grid/line/alignment scans) against a **fake IOC** — 
 
 Headless core (pure Python; no Panel):
 
-* :mod:`smi_acquire.project`   — Project / Sample / SampleSet / Experiment: the persistent
-  sample-list spine; experiments are scan recipes that target a sample-set.
+* :mod:`smi_acquire.store`     — the boundary onto the shared **redis db=2 sample store**
+  (``smi_plans.SampleStore``): holders + samples + the active-sample pointer live there.
+* :mod:`smi_acquire.project`   — the **local** session document: transient experiment *recipes*
+  (which target a holder / all samples) + local reference fiducials.
 * :mod:`smi_acquire.spec`      — the ``ExperimentSpec`` scan-recipe model codegen/dryrun consume.
 * :mod:`smi_acquire.registry`  — the SMI device / detector / axis-concern catalog.
 * :mod:`smi_acquire.interview` — the interrogation: questions → a tailored starting recipe.
@@ -25,7 +27,7 @@ Interactive + simulation:
 * :mod:`smi_acquire.sim`        — the fake caproto IOC + in-process ``SimBeamline``.
 """
 
-from . import spec, registry, interview, codegen, samples, project  # noqa: F401
+from . import spec, registry, interview, codegen, samples, project, store  # noqa: F401
 
-__all__ = ["spec", "registry", "interview", "codegen", "samples", "project"]
+__all__ = ["spec", "registry", "interview", "codegen", "samples", "project", "store"]
 __version__ = "0.1.0"
