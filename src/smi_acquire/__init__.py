@@ -1,18 +1,31 @@
 """
-smi-acquire -- a flexible sample-list + technique-picker + script-generator for the NSLS-II
-SMI-SWAXS endstation.
+smi-acquire — an **interrogation-driven acquisition builder** for the NSLS-II SMI-SWAXS
+endstation.
 
-The package is a **headless core** (pure Python, no GUI, no bluesky) that every front-end
-(Panel / Qt / NiceGUI) consumes:
+Rather than choosing one of a fixed A–O menu, the user is *interrogated* — a guided interview
+asks what they need (beam/q, geometry/environment, what they're varying, how samples are
+handled) and **assembles a bespoke plan** as a serializable :class:`ExperimentSpec`. Sample
+positions are built interactively with the vendored on-axis microscope (live camera,
+click-to-move, bookmarks, grid/line/alignment scans) against a **fake IOC** — no real hardware.
 
-* :mod:`smi_acquire.samples`    -- the GUI-facing Sample / SampleList model (sourced from
-  ``smi_plans`` when available) + table <-> object helpers.
-* :mod:`smi_acquire.techniques` -- declarative A--O technique registry (params + entry points).
-* :mod:`smi_acquire.guidance`   -- "which technique do I want?" recommendation rules.
-* :mod:`smi_acquire.codegen`    -- (SampleList, technique, params) -> runnable script string.
+Headless core (pure Python; no Panel):
+
+* :mod:`smi_acquire.project`   — Project / Sample / SampleSet / Experiment: the persistent
+  sample-list spine; experiments are scan recipes that target a sample-set.
+* :mod:`smi_acquire.spec`      — the ``ExperimentSpec`` scan-recipe model codegen/dryrun consume.
+* :mod:`smi_acquire.registry`  — the SMI device / detector / axis-concern catalog.
+* :mod:`smi_acquire.interview` — the interrogation: questions → a tailored starting recipe.
+* :mod:`smi_acquire.codegen`   — ``ExperimentSpec`` → runnable ``smi_plans`` script.
+* :mod:`smi_acquire.dryrun`    — exec the script against a simulated beamline; report runs/events.
+* :mod:`smi_acquire.samples`   — Sample / SampleList bridge (sourced from ``smi_plans``).
+
+Interactive + simulation:
+
+* :mod:`smi_acquire.microscope` — vendored on-axis microscope (Panel/Bokeh) sample builder.
+* :mod:`smi_acquire.sim`        — the fake caproto IOC + in-process ``SimBeamline``.
 """
 
-from . import samples, techniques, guidance, codegen  # noqa: F401
+from . import spec, registry, interview, codegen, samples, project  # noqa: F401
 
-__all__ = ["samples", "techniques", "guidance", "codegen"]
-__version__ = "0.0.1"
+__all__ = ["spec", "registry", "interview", "codegen", "samples", "project"]
+__version__ = "0.1.0"

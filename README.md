@@ -1,149 +1,149 @@
 # smi-acquire
 
-A flexible **sample-list editor → technique picker → runnable-script generator** for the
-NSLS-II **SMI-SWAXS** endstation.
+An **interrogation-driven acquisition builder** for the NSLS-II **SMI-SWAXS** endstation.
 
-It turns the `smi_plans` acquisition-template library
-(`SWAXS_user_scripts/templates/smi_plans/`) into a friendly, low-friction GUI: the user edits
-a sample bar in very flexible ways, is guided to the right technique (the A–O taxonomy), fills
-a small typed form, and gets a **copy-pasteable beamline script**. Later, the same inputs can
-drive a **queueserver** submission instead of emitting text.
+You don't pick "experiment A–O". You're **interviewed** — a guided set of plain-language
+questions about your beam/q, geometry, environment, what you're varying, and how samples are
+handled — and the app **assembles a bespoke plan** for exactly your need. Sample positions are
+placed **interactively** on the live on-axis microscope (click-to-move, bookmarks, microfocus
+grids, knife-edge alignment). The output is a runnable `smi_plans` script, **validated against
+simulated devices** before you ever take beam.
 
-> This repo is a set of **candidate GUI mockups** built on one shared headless core, so we can
-> compare layouts and frameworks before committing.
+> Everything here runs **hardware-free**: the microscope talks to a bundled fake caproto IOC,
+> and plan validation runs against an in-process simulated beamline. No real devices are
+> touched.
 
 ---
 
-## Architecture: one core, many front-ends
+## Why the rethink
+
+The earlier smi-acquire offered a fixed A–O technique menu. But a real SMI experiment is *not*
+one of A–O — it's an **assembly of concerns** (beam/q × apparatus/geometry × a *stack* of
+nested scan axes × manual steps × what to record). This version embraces that directly, on top
+of the composition layer in [`smi-plans`](../smi-plans) (`acquire` + `ScanAxis` builders), and
+folds in the interactive sample/microfocus builder from
+[`swaxs-beam-image`](../swaxs-beam-image).
 
 ```
-                       ┌─────────────────────────────────────────────┐
-                       │  smi_acquire  (pure Python, no GUI, no bluesky)│
-                       │                                               │
-   smi_plans._samples ─┤  samples     Sample/SampleList + table <-> obj │
-   (single source of   │  techniques  declarative A–O registry (params) │
-    truth, reused)     │  guidance    "which technique?" rule engine     │
-                       │  codegen     (bar, technique, params) -> script │
-                       └───────────────┬─────────────┬─────────────┬────┘
-                                       │             │             │
-                           ┌───────────┘     ┌───────┘      ┌──────┘
-                     Panel wizard      Panel dashboard   Qt / NiceGUI
-                   (apps/panel_*.py)   (apps/panel_*.py) (apps/qt_app.py, nicegui_app.py)
+   Interrogate ─▶ ExperimentSpec ─▶ codegen  ─▶ runnable smi_plans script  (copy/paste)
+   (interview)    (pure data,       └▶ dry-run ─▶ "✅ N runs / M events" or the exact error
+    + refine       JSON-safe)        (simulated beamline — no hardware)
+        ▲
+        │ samples
+   Interactive on-axis microscope (live camera, bookmarks, grid/line/alignment) → fake IOC
 ```
 
-The core is **framework-agnostic and unit-tested**. Every front-end is *only* widgets bound to
-the core — no acquisition logic is duplicated. This is what makes the eventual swap to a
-queueserver backend (or a Qt rewrite) cheap.
-
-The sample data model is **not re-implemented** — `smi_acquire.samples` imports
-`Sample`/`SampleList` straight from `smi_plans._samples` (the deliberately pure-Python half of
-the plan library), with a minimal vendored fallback so the apps still launch off-beamline.
+The **ExperimentSpec** is the contract in the middle: pure data, device references are *names*
+(not live objects), so it can be saved/loaded/diffed and — later — shipped to a queueserver
+worker with no GUI rewrite.
 
 ---
 
 ## Quickstart
 
 ```bash
-cd ~/git/smi/smi-acquire
 pixi install
 
-pixi run test          # 13 tests; every generated A–O script is compiled to prove validity
-pixi run dashboard     # Panel single-page dashboard  -> http://localhost:5006
-pixi run wizard        # Panel guided wizard
+pixi run test          # headless core + a dry-run against simulated devices
+pixi run dev-ioc       # terminal 1: fake camera + X/Y/Z motors (SWAXS:SIM:)
+pixi run app           # terminal 2: the app  →  http://localhost:5098/acquire_app
 ```
 
-Optional native / alternative front-ends (separate envs so they don't bloat the default):
-
-```bash
-pixi run -e qt qt            # PySide6 desktop app
-pixi run -e nicegui nicegui  # NiceGUI web app -> http://localhost:8080
-```
-
-Point the core at your `smi_plans` checkout via `SMI_PLANS_PATH` (already set in `pixi.toml`
-to the in-repo location). Without it, a vendored fallback model is used.
+`pixi run app-real` is the variant for later real PVs (point `config/microscope.local.yaml`
+at your hardware); `app` defaults to localhost-only EPICS so it can only ever see the fake IOC.
 
 ---
 
-## The four mockups (layout candidates)
+## The app: a sample list with two screens
 
-| App | Framework | Layout concept | Best for |
-|---|---|---|---|
-| `apps/panel_wizard.py` | Panel/Bokeh | **Guided wizard** — 5 steps, one at a time, with a goal-questionnaire that auto-picks the technique | New / occasional users |
-| `apps/panel_dashboard.py` | Panel/Bokeh | **Single-page dashboard** — everything visible, live-regenerating script + queueserver-item preview | Power users / staff |
-| `apps/qt_app.py` | PySide6 | **Native 3-pane desktop** (QSplitter) | Offline / desktop-native preference |
-| `apps/nicegui_app.py` | NiceGUI | **Compact reactive web** (ag-Grid + forms) | Lightweight web alternative to Panel |
+The **sample list is the spine** — a persistent sidebar table present on both screens. Samples
+carry an optional position + free metadata + sample-set membership; a positioned, *visible*
+sample shows as a marker on the live image.
 
-All four are wired to the identical core, so they generate identical scripts for identical
-inputs — they exist to compare **ergonomics and layout**, not behavior.
+**Align & Samples** (home)
+- The on-axis microscope: live camera, click-to-move, and the **Scan** tabs for fast
+  line / grid / polygon **alignment** (useful standalone, no plan required).
+- Capture stage positions into the spine: **★ new sample here** / **assign → selected** /
+  **+ reference here**, reading the live motor positions.
 
-See **[`docs/DESIGN.md`](docs/DESIGN.md)** for the framework trade-off discussion and the
-reasoning behind each layout.
+**Plan**
+- Build a scan **recipe** — add/reorder axes directly, or **seed it from a short interview**
+  (the interrogation, now non-reloading).
+- **Target a sample-set** (or all samples); see the generated `smi_plans` script + a **dry-run**
+  (runs/events/warnings, and which targeted samples still lack a position).
+- Save it as an **Experiment** on the project; a project can hold several.
 
----
+Import/export from the sidebar: **samples.csv** (positions + metadata + set + experiment
+columns, re-importable) and **project.json** (full fidelity, round-trips everything).
 
-## What the user does (the flow)
-
-1. **Edit the bar** — paste rows, edit cells, load a CSV, add/dup/delete. Only the axes you
-   set are used; blanks mean *don't move that axis*. (`Sample`/`SampleList` validation:
-   unique names, typed coordinates.)
-2. **Pick the technique** — answer a couple of plain-language questions ("what are you
-   varying?", "what geometry?") and `guidance` ranks the A–O archetypes with a human reason,
-   or just choose from the full list.
-3. **Set parameters** — a typed form generated from the technique's `ParamSpec`s (energy grid,
-   incident angles, setpoints, exposure, fresh-spot dose step, …).
-4. **Copy & run** — a complete script: add templates to `sys.path`, build the bar with
-   `SampleList.from_columns(...)`, and `RE(<technique>.<entry>(bar, …))`.
-
-Example generated output (technique A, energy edge):
+### Example generated script
 
 ```python
-"""Generated by smi-acquire. Review before running on the beamline."""
+"""Generated by smi-acquire (interrogation builder). Review before running."""
+import numpy as np
 import sys; sys.path.append('/home/xf12id/SWAXS_user_scripts/templates')
+from smi_plans._compose import (acquire_bar, energy_axis, incidence_axis, spatial_grid_axes, temperature_axis)
+from smi_plans._core import saxs_waxs_dets
 from smi_plans import SampleList
-from smi_plans import technique_A_energy_edge as A
+from smi_plans.technique_C_temperature import linkam_heater
 
 bar = SampleList.from_columns(
-    names=['P3HT_undoped', 'P3HT_topdope'],
-    piezo_x=[-56000, -45000],
-    piezo_y=[4000, 4000],
-    incident_angles=[0.1, 0.2],
-    md={'project_name': '311234_Demo'},
-)
+    names=['s1', 's2'], piezo_x=[-56000, -45000], piezo_y=[4000, 4000],
+    incident_angles=[0.1, 0.2], md={'project_name': '311234_Doe'})
 
-energies = A.energy_grid(2822.0, pre=(-12, -2, 2), near=(-2, 2, 0.5), post=(2, 70, 5))
+dets = saxs_waxs_dets()        # arc-aware: SAXS dropped if WAXS arc parked
+reads = [energy, waxs, xbpm2, xbpm3]
+heater = linkam_heater()
 
-RE(A.nexafs_bar(bar, energies, t=1.0, geometry='transmission', updown=True, settle=2.0, dose_step=None))
+def setup():
+    yield from alignement_gisaxs_hex(0.1)
+
+def axes_for(s):
+    th0 = piezo.th.position
+    return [
+        temperature_axis(heater, [30, 60, 90], soak=120, first_soak=300),
+        energy_axis([2470, 2470.25, ...], settle=2),
+        incidence_axis(piezo.th, th0, [0.1, 0.2]),
+        *spatial_grid_axes(x_motor=piezo.x, x=[0, 30, 60, 90, 120], snake=True),
+    ]
+
+det_exposure_time(1, 1)
+# ---- RUN THIS ----
+RE(acquire_bar(bar, dets, axes_for, setup_for=lambda s: setup(), reads=reads,
+               geometry='reflection', scan_name='giwaxs_Tramp_NEXAFS_map',
+               md={'project_name': '311234_Doe'}))
 ```
+
+---
+
+## Layout
+
+```
+smi-acquire/
+├── src/smi_acquire/
+│   ├── project.py      ★ Project / Sample / SampleSet / Experiment — the persistent spine
+│   ├── spec.py         ★ ExperimentSpec — the scan-recipe model codegen/dryrun consume
+│   ├── registry.py       SMI device / detector / axis-concern catalog
+│   ├── interview.py    ★ the interrogation: questions → a tailored starting recipe
+│   ├── codegen.py      ★ Experiment/ExperimentSpec → runnable smi_plans script
+│   ├── dryrun.py         exec the script vs a simulated beamline; report runs/events
+│   ├── samples.py        Sample / SampleList bridge (sourced from smi_plans)
+│   ├── microscope/       vendored on-axis microscope (camera, modes, builder.py)
+│   └── sim/              fake caproto IOC + in-process SimBeamline
+├── apps/acquire_app.py   the unified Panel app (sample-spine sidebar + Align/Plan screens)
+├── config/microscope.yaml fake-IOC config for the microscope
+├── tests/                test_core.py + test_project.py
+└── docs/DESIGN.md        the rationale + how the pieces fit
+```
+
+See **[`docs/DESIGN.md`](docs/DESIGN.md)** for the full rationale, the spec schema, and the
+(designed-for, not-yet-built) queueserver seam.
 
 ---
 
 ## Toward the queueserver backend
 
-`codegen.to_queueserver_item(...)` already returns the dict shape (`name` = plan entry point,
-`kwargs` = serialized `SampleList.to_dicts()` + rendered params) that maps onto a
-`bluesky-queueserver` `BPlan`. The dashboard shows it live next to the script. Switching from
-"copy a script" to "submit to qserver" is then a localized change in one module — the sample
-editing, guidance, and parameter forms are untouched.
-
----
-
-## Project layout
-
-```
-smi-acquire/
-├── src/smi_acquire/
-│   ├── samples.py      # GUI Sample model (sourced from smi_plans) + table <-> object
-│   ├── techniques.py   # declarative A–O registry (ParamSpec / TechniqueSpec)
-│   ├── guidance.py     # "which technique?" recommendation rules
-│   └── codegen.py      # (SampleList, technique, params) -> runnable script / qserver item
-├── apps/
-│   ├── _panel_common.py    # shared Panel widget factory
-│   ├── panel_wizard.py     # layout candidate 1
-│   ├── panel_dashboard.py  # layout candidate 2
-│   ├── qt_app.py           # layout candidate 3 (PySide6)
-│   └── nicegui_app.py      # layout candidate 4 (NiceGUI)
-├── tests/test_core.py      # headless tests (compile every generated script)
-├── docs/DESIGN.md          # framework + layout trade-offs
-├── pixi.toml
-└── pyproject.toml
-```
+`codegen.to_queueserver_item(spec)` already returns a `BPlan`-shaped dict carrying the whole
+(pure-data) spec. Because the spec keeps device references as names, switching from "copy a
+script" to "submit to qserver" is an additive change — a new consumer of the same spec — with
+the interrogation, refine, and sample-builder UIs untouched.

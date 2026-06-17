@@ -1,54 +1,70 @@
 [workspace]
 name = "smi-acquire"
-description = "Flexible sample-list + technique-picker + script-generator GUI for the NSLS-II SMI-SWAXS endstation"
-channels = ["conda-forge"]
-platforms = ["linux-64", "osx-arm64", "osx-64"]
+description = "Interrogation-driven acquisition builder + interactive sample/microfocus builder for the NSLS-II SMI-SWAXS endstation"
+channels = ["conda-forge", "nsls2forge"]
+platforms = ["linux-64"]
 
 [dependencies]
 python = "3.11.*"
-numpy = ">=1.26,<3"
+pip = "*"
+numpy = "*"
 pandas = ">=2.0,<3"
-bokeh = ">=3.9,<4"
-panel = ">=1.8,<2"
+# GUI (Panel/Bokeh) + the interactive on-axis microscope
+panel = ">=1.4"
+bokeh = ">=3.4"
+pyyaml = "*"
+pydantic = ">=2"
+scikit-image = "*"
+shapely = "*"
+watchfiles = "*"
+# EPICS + bluesky stack (fake IOC for the microscope; SimBeamline for dry-runs)
+pyepics = "*"
+ophyd = "*"
+caproto = "*"
+p4p = "*"
+bluesky = "*"
 pytest = "*"
+ruff = "*"
 
 [pypi-dependencies]
 smi-acquire = { path = ".", editable = true }
 
-# Path to the smi_plans templates package (the pure-Python Sample model + technique plans).
-# The core auto-discovers a couple of known locations; override here if yours differs.
 [activation.env]
-SMI_PLANS_PATH = "/nsls2/users/egann/git/smi/scripts/SWAXS_user_scripts/templates"
+# Keep the env hermetic (ignore ~/.local site-packages that would shadow conda deps).
 PYTHONNOUSERSITE = "1"
+# Where the smi_plans package lives (codegen targets it; dry-run imports it).
+SMI_PLANS_PATH = "/nsls2/users/egann/git/smi/smi-plans/src"
+# Point the vendored microscope at the bundled fake-IOC config.
+BEAM_IMAGE_CONFIG = "config/microscope.yaml"
 
-# ---- Panel front-ends (the two layout candidates) -------------------------
-[tasks.wizard]
-cmd = "panel serve apps/panel_wizard.py --show --autoreload"
+# --------------------------------------------------------------------------
+# The unified guided-interview app (interrogation + interactive sample builder).
+# Serves on 5098 to avoid colliding with other Panel servers (5006 / 5099).
+# Run `pixi run dev-ioc` in another terminal first for the live camera + motors.
+#
+# NOTE: `dev-ioc` binds the fake IOC to loopback only, so the app (a CA *client*) must be
+# told to look at 127.0.0.1 — hence the EPICS_CA_* env here. Without it the client broadcasts
+# on the real NIC and never finds SWAXS:SIM:*. This is the hardware-free default.
+# --------------------------------------------------------------------------
+[tasks.app]
+cmd = "panel serve apps/acquire_app.py --show --autoreload --port 5098"
+env = { BEAM_IMAGE_CONFIG = "config/microscope.yaml", EPICS_CA_AUTO_ADDR_LIST = "no", EPICS_CA_ADDR_LIST = "127.0.0.1" }
 
-[tasks.dashboard]
-cmd = "panel serve apps/panel_dashboard.py --show --autoreload"
+# Hardware-free fake IOC (SWAXS:SIM: camera + X/Y/Z motors), bound to localhost.
+[tasks.dev-ioc]
+cmd = "python -m smi_acquire.sim.fake_ioc"
+env = { EPICS_CA_AUTO_ADDR_LIST = "no", EPICS_CA_ADDR_LIST = "127.0.0.1", EPICS_CAS_AUTO_BEACON_ADDR_LIST = "no", EPICS_CAS_BEACON_ADDR_LIST = "127.0.0.1", EPICS_CAS_INTF_ADDR_LIST = "127.0.0.1" }
+
+# Real-PV variant (for later): inherits your shell's EPICS_CA_* and loads config/microscope.local.yaml
+# if present. Point that file at your real camera/motor PVs.
+[tasks.app-real]
+cmd = "panel serve apps/acquire_app.py --show --autoreload --port 5098"
 
 [tasks.test]
 cmd = "python -m pytest tests/ -q"
 
+[tasks.lint]
+cmd = "ruff check src apps tests"
+
 [tasks.check]
 cmd = "python -c \"import smi_acquire; print('core OK', smi_acquire.__version__)\""
-
-# ---- Optional Qt desktop variant -----------------------------------------
-[feature.qt.pypi-dependencies]
-pyside6 = "*"
-
-[feature.qt.tasks.qt]
-cmd = "python apps/qt_app.py"
-
-# ---- Optional NiceGUI variant --------------------------------------------
-[feature.nicegui.pypi-dependencies]
-nicegui = "*"
-
-[feature.nicegui.tasks.nicegui]
-cmd = "python apps/nicegui_app.py"
-
-[environments]
-default = { solve-group = "default" }
-qt = { features = ["qt"], solve-group = "default" }
-nicegui = { features = ["nicegui"], solve-group = "default" }

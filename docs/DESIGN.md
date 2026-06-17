@@ -1,156 +1,104 @@
-# Design notes — smi-acquire GUI options
+# smi-acquire — design
 
-This document records the framework options considered and the reasoning behind the candidate
-layouts, so we can choose a direction deliberately.
+## The thesis
 
----
+An SMI-SWAXS experiment is not one of a fixed menu (the old A–O picker). It is an **assembly of
+independent concerns**:
 
-## 1. The governing idea: a headless core
+| concern | examples |
+|---|---|
+| beam / q-range | which detectors (+ the WAXS arc reach); what to record per event |
+| apparatus / geometry | transmission vs grazing; alignment; heater; attenuators |
+| sampling / scanning | a **stack** of nested scan axes (energy, temperature, incidence, spatial grid, potential, RH, time, manual) |
+| manual / interactive | one-shot prompts that capture typed values into recorded Signals |
+| samples | one run per sample; positions placed interactively |
 
-Whatever the front-end, the job decomposes into four pure-data concerns:
+So instead of "choose A–O", we **interrogate** the experimenter and *assemble* the plan they
+need. The runnable embodiment of each concern already exists in
+[`smi-plans`](../smi-plans) — `acquire`/`acquire_bar` wrapping `ScanAxis` builders — and the
+interactive sample/microfocus tooling exists in
+[`swaxs-beam-image`](../swaxs-beam-image). This package is the **interview + glue** between them.
 
-1. **Sample model** — edit a `SampleList` flexibly (paste, CSV, manual, future visual bar).
-2. **Guidance** — map "what are you doing?" onto the A–O technique archetypes.
-3. **Parameter capture** — a typed form per technique.
-4. **Output** — emit a runnable script *now*; submit a queueserver item *later*.
-
-None of these require a GUI. So `smi_acquire` is a **framework-agnostic, unit-tested core**,
-and each GUI is a thin binding. This is the single most important design decision: it makes
-the framework choice reversible and the queueserver migration localized.
-
-It also reuses, rather than re-implements, the `smi_plans._samples` model — the library authors
-deliberately kept that half pure-Python *"so a GUI could eventually import the same building
-blocks"* (their README). We take them up on it: one source of truth, no drift.
-
-### Why a *registry* instead of bespoke forms
-
-`techniques.py` describes each archetype as data (`ParamSpec` list + a call template). A
-front-end builds widgets by **iterating the registry**, and `codegen` renders calls by
-**formatting the template** with rendered literals. Adding a technique or a knob is a data
-edit, not new UI code in four apps. The test suite compiles every generated A–O script, so a
-malformed template fails CI rather than the beamline.
-
----
-
-## 2. Framework options
-
-### Option A — Panel/Bokeh  ✅ recommended primary
-
-- **Pros:** matches your existing stack exactly (`smi-browser`, `samples/locate-samples`),
-  already in your pixi envs; `Tabulator` is an excellent paste-friendly sample grid;
-  `CodeEditor` gives syntax-highlighted output; trivial to embed alongside the analysis app
-  later (one server, multiple pages); served over the web → works on the beamline network with
-  no client install.
-- **Cons:** reactive wiring is more verbose than NiceGUI; very custom layouts fight the
-  templates a bit.
-- **Verdict:** lowest friction to something real and shippable here.
-
-### Option B — Qt (PySide6) desktop
-
-- **Pros:** native widgets, the most flexible tables/dialogs/keyboard handling, no browser,
-  feels like an instrument-control app; good if this becomes a always-open console tool.
-- **Cons:** new heavy dependency (not installed); packaging/remote-display friction on
-  beamline Linux (X forwarding / VNC); more boilerplate.
-- **Verdict:** keep as a candidate; strongest if the tool wants to live *beside* the
-  RunEngine console rather than in a browser. The mockup proves the core ports cleanly.
-
-### Option C — NiceGUI
-
-- **Pros:** the most compact reactive Python API of the web options; very pleasant for
-  form-heavy tools; ag-Grid built in.
-- **Cons:** smaller ecosystem than Panel; another dependency; less synergy with your existing
-  Panel analysis app.
-- **Verdict:** good ergonomics benchmark; include to compare against Panel's verbosity.
-
-### Option D — Streamlit (considered, not built)
-
-- Rerun-on-every-interaction model is awkward for a stateful multi-step builder with a live
-  table; would fight the wizard. Omitted in favor of NiceGUI as the "lightweight web" sample.
-
-### Recommendation
-
-Build on **Panel** for the real tool (reuses your stack, web-deployable, pairs with the
-browser app). Keep the **Qt** and **NiceGUI** mockups as living proof the core is portable, so
-the decision stays open and cheap to revisit.
-
----
-
-## 3. Layout candidates
-
-Two distinct *interaction philosophies*, each rendered in Panel; the Qt/NiceGUI apps echo the
-dashboard so all four are comparable.
-
-### Candidate 1 — Guided wizard (`panel_wizard.py`)
+## The pipeline
 
 ```
-┌── Steps ─────┐   ┌──────────────────────────────────────────────┐
-│ > 1 Samples  │   │  Build your sample bar                        │
-│   2 Goal     │   │  [ Tabulator: name | piezo_x | … | md ]       │
-│   3 Technique│   │  [ Load CSV ]  [ Project name ]               │
-│   4 Params   │   │                                               │
-│   5 Script   │   │                          [ < Back ] [ Next > ]│
-└──────────────┘   └──────────────────────────────────────────────┘
+ interview.py        spec.py             codegen.py            dryrun.py
+ (interrogation)  →  ExperimentSpec   →  smi_plans script  →   exec vs SimBeamline
+   questions          (pure data)         (copy/paste)          → runs/events/warnings/errors
+        │                  ▲
+        └── seed ──────────┘     samples ← microscope/ (live camera + bookmarks → fake IOC)
 ```
 
-- One concern at a time; a goal questionnaire (`guidance`) auto-selects the technique and
-  explains *why*.
-- **For:** new/occasional users, training, minimizing "which of the 15 plans do I want?"
-  paralysis.
-- **Against:** slower for an expert who already knows they want technique B.
+### `spec.ExperimentSpec` — the contract in the middle
 
-### Candidate 2 — Single-page dashboard (`panel_dashboard.py`)
+A JSON-serializable dataclass tree (`beam`, `apparatus`, `axes[]`, `manual_setup[]`, `samples`).
+Design rules, all to keep the eventual queueserver path additive:
 
-```
-┌ Sample bar ────────┐ ┌ Technique & params ─┐ ┌ Generated script ───────┐
-│ [ Tabulator ]      │ │ I'm varying… ▾      │ │ status: OK – 2 samples  │
-│ [+][-][Dup][CSV]   │ │ Technique ▾         │ │ ```python               │
-│ Project name       │ │ summary text        │ │  …live script…          │
-│                    │ │ ── params (cards) ──│ │ ```                     │
-│                    │ │ exposure, grid, …   │ │ qserver item (preview)  │
-└────────────────────┘ └─────────────────────┘ │ [ Download .py ]        │
-                                                └─────────────────────────┘
-```
+- **Device references are names/strings**, never live objects (`"waxs"`, `"piezo"`, `"att2_9"`).
+  The generator maps names → bare identifiers; the sim provides stand-ins.
+- **Axis order in `axes[]` = nesting order** (outermost first), mirroring
+  `smi_plans._compose.acquire(axes=[...])`.
+- It carries a `version` from day one.
+- It computes its own analysis (event estimate, filename tokens, and the **same slow-outermost
+  ordering guardrail** `_compose._check_axis_order` uses) so the GUI can warn pre-flight.
 
-- Everything visible; the script **regenerates on every change**; a "I'm varying…" filter
-  reorders the technique list (lighter-weight guidance). Shows the **queueserver item** preview
-  beside the script to make the future submit path tangible.
-- **For:** power users / staff, fast iteration, demoing the qserver direction.
-- **Against:** denser; assumes familiarity with the archetypes.
+### `interview` — the interrogation
 
-### Candidate 3 / 4 — Qt & NiceGUI
+`INTAKE` is a small **branching question graph** (`Question` with a `when(answers)` predicate).
+`seed_spec_from_intake(answers, sample_rows)` turns answers into a concrete starting spec with
+axes pre-stacked **slow-outermost**. The user then refines each concern; `axis_param_schema`
+provides the per-axis editor fields and `default_axis` the defaults. This replaces the old
+`guidance` "which letter?" engine with "what shall I build for you?".
 
-Both implement the dashboard philosophy (3-pane / 2-column) to demonstrate the core is
-framework-independent and to compare native-desktop vs compact-web ergonomics.
+### `codegen` — spec → text
 
----
+`render(spec)` emits idiomatic `smi_plans._compose` code (`acquire` for one sample,
+`acquire_bar` for many). Because it is built from the composition layer, the generated script
+**automatically obeys the SMI tenets** (one run/sample, recorded context, `{token}` filenames,
+generators end-to-end, slow axes outermost). It emits only the imports it needs and renders the
+*exact* expanded value lists (e.g. energy grids) so the script visits precisely the points the
+spec counted — keeping the GUI estimate and the dry-run in lockstep.
 
-## 4. Flexible sample-list handling (the core user value)
+### `dryrun` — validate without hardware
 
-Implemented today via `samples.records_to_samples` / `samples_to_records`:
+`dry_run(spec)` renders the script and `exec`s it in a namespace where `RE` just exhausts the
+plan and counts messages, with the **`SimBeamline`** globals injected into the `smi_plans`
+modules (vendored from `smi-plans/tests/conftest.py`). Running the *generated text* validates
+the codegen too. Reports: number of runs (expect one per sample), primary events, ordering
+warnings, and any exception with its type.
 
-- **Paste / spreadsheet edit** (Tabulator / QTableWidget / ag-Grid).
-- **CSV import** (maps to `Sample` fields; unknown columns → `md`).
-- **Add / duplicate / delete** rows.
-- **Tolerant parsing:** blanks → `None` (axis unused), `incident_angles` accepts space/comma/
-  semicolon, `md` accepts JSON or free text.
-- **Validation surfaced inline:** duplicate names raise and show in the status line, not a
-  crash.
+## Simulation: two fakes, one principle
 
-Natural next steps (not yet built, easy on this core):
+- **`sim/fake_ioc.py`** — a caproto IOC publishing `SWAXS:SIM:` camera + X/Y/Z motor records.
+  Drives the *interactive* microscope over EPICS (`pixi run dev-ioc`). Vendored from
+  swaxs-beam-image.
+- **`sim/beamline.py::SimBeamline`** — in-process `ophyd.sim` devices + the global identifiers
+  the `smi_plans` plans expect. Drives *plan validation*.
 
-- A **visual bar** widget (Bokeh scatter of piezo_x/piezo_y) to place/drag samples.
-- **Templates** for common bar geometries (well plates, capillary racks).
-- **Round-trip persistence** (`to_dicts`/`from_dicts` already exist) to save/restore a session.
+Neither touches real hardware. The config (`config/microscope.yaml`, via `$BEAM_IMAGE_CONFIG`)
+points the microscope at the fake IOC by default.
 
----
+## The vendored microscope
 
-## 5. The queueserver seam
+`swaxs-beam-image`'s package is vendored under `microscope/` (its `app.py`/`__main__.py`
+dropped). `microscope/builder.py` re-assembles it as an **embeddable component** —
+`build_microscope()` returns the layout plus the live `InteractiveMode` bookmark store, so the
+host app harvests bookmark `(x, y, z)` positions into `spec.samples.rows` (mapping onto
+`{motor_object}_x/y/z`). Its own modes (click-to-move, bookmarks, square/polygon/line grids,
+focus, calibrate) are unchanged and still emit their own microfocus/alignment snippets via the
+color-coded script panel.
 
-`codegen.to_queueserver_item()` returns `{"name": <entry>, "kwargs": {"samples": [...],
-...params}, "item_type": "plan"}` — the `BPlan` shape. The migration is:
+## Framework choice
 
-- **today:** `generate_script()` → user copies text → pastes into IPython `RE(...)`.
-- **next:** POST `to_queueserver_item()` to the qserver REST API; stream status back.
+Consolidated on **Panel/Bokeh**: the interactive sample builder needs a live camera figure
+(Bokeh), and a single framework keeps the interview, refine, samples, and script tabs in one
+app. The earlier Qt / NiceGUI / dashboard mockups and the A–O `techniques`/`guidance` core were
+retired.
 
-Because both share the same `(SampleList, technique, params)` inputs, the sample editor,
-guidance, and forms are reused verbatim — only the "Output" pane changes.
+## The queueserver seam (designed for, not built)
+
+`codegen.to_queueserver_item(spec)` returns `{"name": "acquire_from_spec", "kwargs": {"spec":
+…}, "item_type": "plan"}`. A worker-side `acquire_from_spec(spec_dict)` plan would resolve names
+→ devices. Because the spec is pure data and names-only, this is purely additive: a new consumer
+of the same spec, with the GUI untouched. An `Executor` abstraction (`CopyPasteExecutor` now,
+`QueueServerExecutor` later) is the intended insertion point.

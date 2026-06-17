@@ -1,0 +1,60 @@
+epics:
+  camera_prefix: 'SWAXS:SIM:'
+  cam_suffix: 'cam1:'
+  image_protocol: ca
+  image_pv: image1:ArrayData
+  motors:
+    x: SWAXS:SIM:mtrX
+    y: SWAXS:SIM:mtrY
+    z: SWAXS:SIM:mtrZ
+  sample_name_pv: null
+beam:
+  center_px:
+  - 320.0
+  - 240.0
+  width_px: 40.0
+  height_px: 8.0
+  presets:
+    focused:
+      width_px: 40.0
+      height_px: 8.0
+    defocused:
+      width_px: 200.0
+      height_px: 80.0
+calibration:
+  matrix:
+  - - -100.0
+    - 0.0
+  - - 0.0
+    - -100.0
+ui:
+  poll_hz: 10.0
+  motor_units: mm
+  default_step: 0.05
+  max_grid_points: 100000
+  image_size_hint:
+  - 640
+  - 480
+  display_max_dim: 1280
+scripts:
+  motor_object: stage
+  detectors:
+  - det
+  alignment_detectors:
+  - det
+  alignment_pre: ''
+  alignment_post: ''
+  filename_signal_name: filename_template
+references:
+- name: ref1
+  x: 0.7616
+  y: -0.4814
+  z: 0.0
+- name: ref2
+  x: 2.7169
+  y: -0.3578
+  z: 0.0
+- name: test2
+  x: -0.8695
+  y: -0.8409
+  z: 0.0

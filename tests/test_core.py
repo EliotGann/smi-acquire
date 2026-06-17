@@ -1,130 +1,207 @@
-import os
-import sys
+"""
+Headless tests for the interrogation-driven core.
+
+The pure-Python layer (spec / interview / codegen) is tested everywhere; the dry-run tests
+require the beamline env (bluesky + smi_plans) and skip cleanly off-beamline.
+"""
+
+from __future__ import annotations
+
+import ast
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-
-from smi_acquire import samples, techniques, guidance, codegen  # noqa: E402
-
-
-# ---------------------------------------------------------------------------
-# Samples
-# ---------------------------------------------------------------------------
-def _bar():
-    recs = [
-        {"name": "s1", "piezo_x": -56000, "piezo_y": 4000, "incident_angles": "0.1 0.2",
-         "md": '{"project_name": "demo"}'},
-        {"name": "s2", "piezo_x": -45000, "piezo_y": 4000, "incident_angles": "0.1 0.2",
-         "md": ""},
-    ]
-    return samples.records_to_samples(recs)
-
-
-def test_records_roundtrip():
-    bar = _bar()
-    assert len(bar) == 2
-    assert bar[0].piezo_x == -56000.0
-    assert bar[0].incident_angles == [0.1, 0.2]
-    assert bar[0].md["project_name"] == "demo"
-    # round-trip back to records preserves names
-    recs = samples.samples_to_records(bar)
-    assert [r["name"] for r in recs] == ["s1", "s2"]
-
-
-def test_records_to_samples_skips_blank_names():
-    bar = samples.records_to_samples([{"name": ""}, {"name": "ok", "piezo_x": 1}])
-    assert [s.name for s in bar] == ["ok"]
-
-
-def test_duplicate_names_rejected():
-    with pytest.raises(ValueError):
-        samples.records_to_samples([{"name": "x"}, {"name": "x"}])
+from smi_acquire import interview, codegen, registry
+from smi_acquire.spec import AxisSpec, ExperimentSpec, energy_grid_values
 
 
 # ---------------------------------------------------------------------------
-# Technique registry
+# spec model
 # ---------------------------------------------------------------------------
-def test_every_bar_technique_renders_a_call():
-    for letter, spec in techniques.TECHNIQUES.items():
-        call = spec.render_call(spec.defaults())
-        assert call.startswith("{}.{}(".format(spec.alias, spec.entry))
-        # the sample variable must be the first positional argument
-        assert "(bar" in call
+def test_spec_roundtrip():
+    sp = interview.seed_spec_from_intake(
+        {"project_name": "p", "geometry": "reflection", "q": "both",
+         "varying": ["temperature", "energy", "incidence"], "heater": "linkam",
+         "align": True, "sample_mode": "bar"},
+        [{"name": "s1", "piezo_x": 1, "incident_angles": [0.1, 0.2]}])
+    d = sp.to_dict()
+    assert ExperimentSpec.from_dict(d).to_dict() == d
 
 
-def test_paramspec_rendering():
-    p = techniques.ParamSpec("waxs_arc", "arc", "floats", [0, 20])
-    assert p.render() == "[0, 20]"
-    p2 = techniques.ParamSpec("g", "g", "choice", "transmission")
-    assert p2.render() == "'transmission'"
-    p3 = techniques.ParamSpec("a", "a", "token", "alignement_gisaxs_hex")
-    assert p3.render() == "alignement_gisaxs_hex"
-    p4 = techniques.ParamSpec("d", "d", "optfloat", None)
-    assert p4.render() == "None"
-    assert p4.render(30) == "30.0"
-    p5 = techniques.ParamSpec("r", "r", "tuple", (-60, 60, 121))
-    assert p5.render() == "(-60, 60, 121)"
+def test_energy_grid_expansion_is_exact():
+    vals = energy_grid_values({"edge": 2472, "near": [-2, 2, 0.25], "post": [2, 60, 5]})
+    assert vals[0] == 2470.0
+    assert 2472.0 in vals
+    # near: 2470..2474 step .25 = 17 pts; post: 2474..2529 step 5 = 12 pts; 2474 shared
+    assert len(vals) == 17 + 12 - 1
 
 
-# ---------------------------------------------------------------------------
-# Codegen
-# ---------------------------------------------------------------------------
-def test_generate_script_A_runs_compile():
-    script = codegen.generate_script(_bar(), "A", {"edge": 2822.0, "t": 1.0})
-    assert "from smi_plans import technique_A_energy_edge as A" in script
-    assert "energies = A.energy_grid(2822" in script
-    assert "RE(A.nexafs_bar(bar, energies" in script
-    compile(script, "<A>", "exec")  # generated script must be valid Python
-
-
-def test_generate_script_B_arc_economy_switch():
-    base = codegen.generate_script(_bar(), "B", {"arc_economy": False})
-    eco = codegen.generate_script(_bar(), "B", {"arc_economy": True})
-    assert "giwaxs_bar(" in base
-    assert "giwaxs_bar_arc_economy(" in eco
-    compile(eco, "<B>", "exec")
-
-
-def test_generate_script_all_letters_compile():
-    bar = _bar()
-    for letter in techniques.all_letters():
-        script = codegen.generate_script(bar, letter)
-        compile(script, "<{}>".format(letter), "exec")
-
-
-def test_samplelist_block_emits_used_columns_only():
-    block = codegen.render_samplelist(_bar())
-    assert "names=['s1', 's2']" in block
-    assert "piezo_x=" in block
-    assert "piezo_z" not in block          # never set -> not emitted
-    assert "incident_angles=[0.1, 0.2]" in block   # shared -> single list
-
-
-def test_queueserver_item_shape():
-    item = codegen.to_queueserver_item(_bar(), "A", {"t": 2.0})
-    assert item["name"] == "nexafs_bar"
-    assert item["item_type"] == "plan"
-    assert isinstance(item["kwargs"]["samples"], list)
-    assert item["kwargs"]["t"] == 2.0
+def test_event_estimate_multiplies_axes():
+    sp = ExperimentSpec(axes=[
+        AxisSpec("temperature", {"values": [30, 60, 90]}),
+        AxisSpec("incidence", {"values": [0.1, 0.2]}),
+    ])
+    assert sp.events_per_sample() == 6
 
 
 # ---------------------------------------------------------------------------
-# Guidance
+# interrogation
 # ---------------------------------------------------------------------------
-def test_recommend_energy_edge():
-    recs = guidance.recommend({"control_variable": "photon_energy",
-                               "geometry": "transmission"})
-    assert recs[0]["letter"] == "A"
-    assert recs[0]["reasons"]
+def test_seed_orders_slow_axes_outermost():
+    sp = interview.seed_spec_from_intake(
+        {"geometry": "reflection", "q": "both",
+         "varying": ["spatial", "temperature", "energy"], "heater": "linkam"})
+    # temperature (slow) must come before energy (medium) before spatial (fast)
+    types = [a.type for a in sp.axes]
+    assert types.index("temperature") < types.index("energy") < types.index("spatial")
 
 
-def test_recommend_specialty_overrides():
-    recs = guidance.recommend({"control_variable": "rotation",
-                               "specialty": ["cd_metrology"]})
-    assert recs[0]["letter"] == "I"
+def test_seed_sets_apparatus_from_environment():
+    sp = interview.seed_spec_from_intake(
+        {"geometry": "reflection", "varying": ["temperature"], "heater": "lakeshore",
+         "align": True})
+    assert sp.apparatus.heater == "lakeshore"
+    assert sp.apparatus.align_routine == "alignement_gisaxs_hex"
+    assert sp.apparatus.geometry == "reflection"
 
 
-def test_recommend_keywords():
-    recs = guidance.recommend({}, keywords="humidity swelling")
-    assert any(r["letter"] == "G" for r in recs)
+def test_manual_mode_adds_capture_step():
+    sp = interview.seed_spec_from_intake(
+        {"varying": [], "sample_mode": "manual", "manual_thickness": True})
+    assert sp.manual_setup and sp.manual_setup[0].values[0]["name"] == "thickness_nm"
+
+
+def test_order_warning_fires_when_slow_inside_fast():
+    sp = ExperimentSpec(axes=[
+        AxisSpec("spatial", {"x": [0, 1, 2]}),          # fast, outer (wrong)
+        AxisSpec("temperature", {"values": [30, 60]}),  # slow, inner (wrong)
+    ])
+    assert sp.order_warnings()
+
+
+# ---------------------------------------------------------------------------
+# codegen — every generated script must be valid python
+# ---------------------------------------------------------------------------
+def _all_axis_specs():
+    out = []
+    for kind in registry.AXIS_KINDS:
+        out.append(interview.default_axis(kind.type))
+    return out
+
+
+def test_codegen_compiles_for_every_axis_kind():
+    for ax in _all_axis_specs():
+        sp = ExperimentSpec(axes=[ax])
+        sp.samples.rows = [{"name": "s1"}]
+        src = codegen.render(sp)
+        ast.parse(src)  # raises SyntaxError on bad codegen
+
+
+def test_codegen_multi_sample_uses_acquire_bar():
+    sp = ExperimentSpec(axes=[interview.default_axis("energy")])
+    sp.samples.rows = [{"name": "a"}, {"name": "b"}]
+    src = codegen.render(sp)
+    assert "acquire_bar(" in src
+    ast.parse(src)
+
+
+def test_codegen_single_sample_uses_acquire():
+    sp = ExperimentSpec(axes=[interview.default_axis("energy")])
+    sp.samples.rows = [{"name": "only"}]
+    src = codegen.render(sp)
+    assert "acquire(bar[0].name" in src
+    ast.parse(src)
+
+
+def test_codegen_emits_heater_and_manual_imports():
+    sp = interview.seed_spec_from_intake(
+        {"geometry": "reflection", "varying": ["temperature"], "heater": "linkam",
+         "sample_mode": "manual", "manual_thickness": True}, [{"name": "s1"}])
+    src = codegen.render(sp)
+    assert "linkam_heater" in src
+    assert "manual_step" in src and "from ophyd import Signal" in src
+    ast.parse(src)
+
+
+# ---------------------------------------------------------------------------
+# message purity — generated plans must contain ONLY messages
+# (smi-plans tenet: never a bare device .put()/.get()/.set() inside a plan;
+#  use yield from bps.mv / bps.rd. Mirrors smi-plans/tests/test_message_purity.py.)
+# ---------------------------------------------------------------------------
+# attribute owners where .get(...) is plain-Python dict/object access, not a device read.
+_DICT_GET_OWNERS = {"md", "kwargs", "ctx", "context", "spec", "s", "d", "state",
+                    "params", "cfg", "config", "self", "p"}
+
+
+def _bare_device_calls(src):
+    """Return [(lineno, code)] of bare .put()/.set()/.get() that look like device calls."""
+    tree = ast.parse(src)
+    lines = src.splitlines()
+    hits = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        attr = node.func.attr
+        if attr not in ("put", "set", "get"):
+            continue
+        if attr == "get":
+            base = node.func.value
+            while isinstance(base, ast.Attribute):
+                base = base.value
+            if isinstance(base, ast.Name) and base.id in _DICT_GET_OWNERS:
+                continue
+            # x.get("string-key", ...) is almost always a dict; device reads take no args.
+            if node.args and isinstance(node.args[0], ast.Constant) and isinstance(
+                    node.args[0].value, str):
+                continue
+        hits.append((node.lineno, lines[node.lineno - 1].strip()))
+    return hits
+
+
+def _purity_specs():
+    """Representative specs covering every axis kind plus heater + manual setup."""
+    specs = []
+    for ax in _all_axis_specs():
+        sp = ExperimentSpec(axes=[ax])
+        sp.samples.rows = [{"name": "s1"}]
+        specs.append(sp)
+    specs.append(interview.seed_spec_from_intake(
+        {"geometry": "reflection", "q": "both",
+         "varying": ["temperature", "energy", "incidence", "spatial"], "heater": "linkam",
+         "align": True, "sample_mode": "manual", "manual_thickness": True},
+        [{"name": "a"}, {"name": "b"}]))
+    return specs
+
+
+def test_generated_scripts_are_message_pure():
+    offenders = {}
+    for sp in _purity_specs():
+        src = codegen.render(sp)
+        hits = _bare_device_calls(src)
+        if hits:
+            offenders[sp.scan_name or "spec"] = hits
+    assert not offenders, (
+        "Generated script contains a bare device .put()/.get()/.set() (plans must be "
+        "message-pure — use yield from bps.mv / bps.rd):\n"
+        + "\n".join("  {}:{}  {}".format(n, ln, code)
+                    for n, hits in offenders.items() for ln, code in hits))
+
+
+# ---------------------------------------------------------------------------
+# dry-run (needs bluesky + smi_plans)
+# ---------------------------------------------------------------------------
+def test_dryrun_one_run_per_sample():
+    pytest.importorskip("bluesky")
+    pytest.importorskip("ophyd")
+    from smi_acquire import dryrun
+    sp = interview.seed_spec_from_intake(
+        {"geometry": "reflection", "q": "both", "varying": ["temperature", "incidence"],
+         "heater": "linkam", "align": True, "sample_mode": "bar"},
+        [{"name": "s1", "incident_angles": [0.1, 0.2]},
+         {"name": "s2", "incident_angles": [0.1, 0.2]}])
+    rep = dryrun.dry_run(sp)
+    if rep.error and "smi_plans not importable" in rep.error:
+        pytest.skip("smi_plans not available")
+    assert rep.ok, rep.error
+    assert rep.runs == sp.n_samples()
+    assert rep.events == sp.total_events()

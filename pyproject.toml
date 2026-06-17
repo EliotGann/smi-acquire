@@ -4,21 +4,32 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smi-acquire"
-version = "0.0.1"
-description = "Sample-list + technique-picker + script-generator core for the NSLS-II SMI-SWAXS endstation"
-requires-python = ">=3.8"
+version = "0.1.0"
+description = "Interrogation-driven acquisition builder + interactive sample/microfocus builder for the NSLS-II SMI-SWAXS endstation"
+requires-python = ">=3.10"
 readme = "README.md"
 license = { text = "BSD-3-Clause" }
+# Pure-Python headless core (spec/registry/interview/codegen) has no hard deps.
 dependencies = []
 
 [project.optional-dependencies]
-panel = ["panel>=1.8", "bokeh>=3.9", "pandas>=2.0"]
-qt = ["pyside6"]
-nicegui = ["nicegui"]
+# The Panel GUI + interactive on-axis microscope sample builder.
+gui = ["panel>=1.4", "bokeh>=3.4", "pandas>=2.0", "pydantic>=2", "pyyaml",
+       "scikit-image", "shapely"]
+# Live microscope (fake IOC) + plan dry-runs against simulated devices.
+beamline = ["pyepics", "ophyd", "caproto", "p4p", "bluesky"]
 test = ["pytest"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"smi_acquire.microscope" = ["py.typed"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
