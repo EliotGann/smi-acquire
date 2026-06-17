@@ -9,13 +9,16 @@ Publishes:
   - the stacked sample stage as fake motor records (SMI geometry):
       piezo (fine, top):  SWAXS:SIM:pzX / pzY / pzZ / pzTH / pzCHI
       Huber (coarse):     SWAXS:SIM:hX / hY / hZ / hTHETA / hCHI / hPHI
-  - legacy aliases SWAXS:SIM:mtrX / mtrY / mtrZ kept pointing at the piezo x/y/z so older
-    configs (motors: {x: mtrX, ...}) still resolve.
 
 The image pattern depends on the (piezo) x/y/z motor positions so click-to-move and bookmark
 projection have something meaningful to track.  (The rotation axes do NOT yet rotate the
 synthetic image — the rotation-aware click math is deferred to real-hardware work; here they
 exist so the full axis state can be captured and moved.)
+
+Startup note: each ``FakeMotor`` initializes its record fields (``.VAL``/``.RBV``/…) on an async
+startup task, so with this many motors the IOC takes ~15–25 s before *all* fields answer CA
+searches.  The app tolerates this (it retries the connection on tab-open / periodic callback);
+a one-shot client should wait accordingly.
 """
 
 from __future__ import annotations
@@ -142,10 +145,6 @@ class SwaxsSimIOC(PVGroup):
     hTHETA = SubGroup(FakeMotor, velocity=2.0, precision=4, user_limits=(-5.0, 5.0), prefix="hTHETA")
     hCHI = SubGroup(FakeMotor, velocity=2.0, precision=4, user_limits=(-5.0, 5.0), prefix="hCHI")
     hPHI = SubGroup(FakeMotor, velocity=5.0, precision=4, user_limits=(-90.0, 90.0), prefix="hPHI")
-    # --- legacy aliases: the old configs used mtrX/Y/Z; point them at the piezo x/y/z ---
-    mtrX = SubGroup(FakeMotor, velocity=2.0, precision=4, user_limits=(-50.0, 50.0), prefix="mtrX")
-    mtrY = SubGroup(FakeMotor, velocity=2.0, precision=4, user_limits=(-50.0, 50.0), prefix="mtrY")
-    mtrZ = SubGroup(FakeMotor, velocity=2.0, precision=4, user_limits=(-50.0, 50.0), prefix="mtrZ")
 
 
 def main() -> None:
