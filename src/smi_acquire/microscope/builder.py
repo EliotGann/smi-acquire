@@ -160,8 +160,13 @@ class _NullMode:
     def tick_table(self): ...
 
 
-def build_microscope(cfg: AppConfig | None = None) -> MicroscopeUI:
-    """Construct the interactive microscope and return its embeddable pieces."""
+def build_microscope(cfg: AppConfig | None = None, *, executor=None) -> MicroscopeUI:
+    """Construct the interactive microscope and return its embeddable pieces.
+
+    ``executor`` is an optional :class:`smi_acquire.execute.Executor`; when given, the motor jog
+    panel routes moves through it (so they are interlock-gated against an external RunEngine).
+    Without one, the panel falls back to direct ophyd moves (standalone microscope).
+    """
     cfg = cfg or load_config()
     camera = Camera.from_config(cfg.epics, name="microscope")
     stage = SampleStage.from_config(cfg.epics, name="stage")
@@ -180,7 +185,7 @@ def build_microscope(cfg: AppConfig | None = None) -> MicroscopeUI:
     beam_overlay.add_to(fig)
     calibration = CalibrationModel.from_config(cfg.calibration)
 
-    motor_panel = MotorPanel(stage, cfg)
+    motor_panel = MotorPanel(stage, cfg, executor=executor)
     beam_panel = BeamPanel(cfg, beam_overlay)
     status_bar = StatusBar(camera, stage)
 

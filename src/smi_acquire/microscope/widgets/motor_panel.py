@@ -22,6 +22,7 @@ def _axis_row(
     default_step: float,
     units: str,
     increment: float,
+    executor=None,
 ) -> tuple[pn.Row, pn.widgets.FloatInput, pn.widgets.StaticText]:
     step = pn.widgets.FloatInput(name=f"step ({units})", value=default_step, step=increment, width=120)
     readback = pn.widgets.StaticText(name=f"{label} pos ({units})", value="—", width=160)
@@ -46,21 +47,32 @@ def _axis_row(
     def _move_rel(delta_sign: int):
         def _cb(_event) -> None:
             try:
-                target = motor.position + delta_sign * float(step.value)
-                _track(motor.set(target))
+                delta = delta_sign * float(step.value)
+                # Route through the executor (interlock-gated) when the host injected one;
+                # otherwise fall back to a direct ophyd move (standalone microscope).
+                if executor is not None:
+                    _track(executor.jog(motor, delta))
+                else:
+                    _track(motor.set(motor.position + delta))
             except Exception as exc:  # noqa: BLE001
                 readback.value = f"err: {exc}"
         return _cb
 
     def _move_abs(_event) -> None:
         try:
-            _track(motor.set(float(abs_input.value)))
+            if executor is not None:
+                _track(executor.move_abs(motor, float(abs_input.value)))
+            else:
+                _track(motor.set(float(abs_input.value)))
         except Exception as exc:  # noqa: BLE001
             readback.value = f"err: {exc}"
 
     def _stop(_event) -> None:
         try:
-            motor.stop()
+            if executor is not None:
+                executor.stop(motor)
+            else:
+                motor.stop()
         except Exception:
             pass
 
@@ -84,18 +96,22 @@ def _axis_row(
 
 
 class MotorPanel:
-    def __init__(self, stage: SampleStage, cfg: AppConfig) -> None:
+    def __init__(self, stage: SampleStage, cfg: AppConfig, executor=None) -> None:
         self.stage = stage
         self.cfg = cfg
+        self.executor = executor
 
         default_step = cfg.ui.default_step
         units = cfg.ui.motor_units
         # Pick a sensible up/down-arrow increment based on units. Users can still type any
         # value; this just sets the +/- step in the numeric input.
         increment = 1.0 if units.lower() in ("um", "µm", "micron", "microns") else 0.001
-        self._row_x, self._step_x, self._rb_x = _axis_row(stage.x, "X", default_step, units, increment)
-        self._row_y, self._step_y, self._rb_y = _axis_row(stage.y, "Y", default_step, units, increment)
-        self._row_z, self._step_z, self._rb_z = _axis_row(stage.z, "Z (focus)", default_step, units, increment)
+        self._row_x, self._step_x, self._rb_x = _axis_row(
+            stage.x, "X", default_step, units, increment, executor)
+        self._row_y, self._step_y, self._rb_y = _axis_row(
+            stage.y, "Y", default_step, units, increment, executor)
+        self._row_z, self._step_z, self._rb_z = _axis_row(
+            stage.z, "Z (focus)", default_step, units, increment, executor)
 
         self.view = pn.Column(
             pn.pane.Markdown("### Motors"),

@@ -32,6 +32,8 @@ from smi_acquire import interview, codegen, dryrun, registry
 from smi_acquire.interview import axis_param_schema, default_axis, reorder_axes_by_speed
 from smi_acquire.project import Project, Experiment, Target, Reference
 from smi_acquire.store import AcquireStore
+from smi_acquire.execute import LocalExecutor, QueueServerExecutor, InterlockedError
+from smi_acquire.interlock import Interlock
 
 pn.extension("tabulator", "codeeditor", sizing_mode="stretch_width", notifications=True)
 
@@ -87,6 +89,10 @@ class AcquireApp:
     def __init__(self):
         self.store = AcquireStore.connect()    # live redis db=2 (auto-falls back offline)
         self.project = Project(name="")        # local: recipes + references only
+        # Motion seam: jog directly via ophyd (interlock-gated); submit = copy-paste to the
+        # beamline RunEngine.  The interlock reads the external RE-busy flag (db=3, read-only).
+        self.interlock = Interlock.from_redis()
+        self.executor = LocalExecutor(interlock=self.interlock)
         self.micro = None                 # MicroscopeUI (lazy: needs the IOC)
         self.current_exp: Experiment | None = None
         self._spine_ids: list[str] = []   # store sample ids, parallel to the spine df rows
@@ -418,6 +424,9 @@ class AcquireApp:
         self.micro_box = pn.Column(pn.pane.Markdown(
             "_microscope starts when you open this tab…_"))
 
+        # RunEngine-busy interlock banner (hidden unless a scan is running on the beamline RE).
+        self.interlock_banner = pn.pane.Alert("", alert_type="danger", visible=False)
+
         self.pos_readout = pn.pane.Markdown("position: —")
         # css class "bookmark-name" lets the in-image 'b' shortcut focus this field.
         self.capture_name = pn.widgets.TextInput(
@@ -438,6 +447,7 @@ class AcquireApp:
         # (next to the bookmark list) once the microscope is built — see _ensure_microscope.
         self.capture_controls = pn.Column(
             pn.pane.Markdown("### Capture position\nMove with the image, then:"),
+            self.interlock_banner,
             self.pos_readout,
             self.capture_name,
             self.capture_holder,
@@ -451,18 +461,32 @@ class AcquireApp:
         )
         self.home = self.micro_box
 
+    def _refresh_interlock(self):
+        """Poll the external RE-busy flag and show/hide the lockout banner (uncached)."""
+        try:
+            banner = self.interlock.banner()
+        except Exception:
+            banner = ""
+        if banner:
+            self.interlock_banner.object = banner
+            self.interlock_banner.visible = True
+        else:
+            self.interlock_banner.visible = False
+
     def _ensure_microscope(self):
         if self.micro is not None:
             return
         try:
             from smi_acquire.microscope.builder import build_microscope
-            ui = build_microscope()
+            ui = build_microscope(executor=self.executor)
             self.micro = ui
             # Fold the capture-position controls into the microscope's Move tab (combined
             # with the bookmark list — they were redundant as a separate panel).
             ui.capture_slot.append(self.capture_controls)
             ui.attach_periodic_callbacks()
             pn.state.add_periodic_callback(self._refresh_pos, period=500)
+            # Poll the RE-busy interlock at ~1.5 Hz (uncached; the flag has a 30s TTL).
+            pn.state.add_periodic_callback(self._refresh_interlock, period=650)
             self.micro_box.clear()
             self.micro_box.append(ui.layout)
             self.sync_markers()
@@ -524,12 +548,24 @@ class AcquireApp:
         validate.on_click(lambda _e: self._validate())
         self.report = pn.pane.Markdown("")
 
+        # Submission seam: copy the RE(...) script to paste into the beamline session (now), or
+        # submit to the queueserver (stub — qserver is not in use yet, so this is disabled).
+        self.copy_re_btn = pn.widgets.Button(
+            name="⧉ Copy RE command", button_type="success", width=200)
+        self.copy_re_btn.on_click(lambda _e: self._submit_copy())
+        self.submit_q_btn = pn.widgets.Button(
+            name="⇪ Submit to queue (qserver — N/A)", button_type="default", width=260,
+            disabled=True)
+        self.submit_q_btn.on_click(lambda _e: self._submit_queue())
+        self.submit_status = pn.pane.Markdown("")
+
         self.plan = pn.Column(
             pn.pane.Markdown("## Build a scan recipe → target a holder"),
             pn.Row(self.exp_select, new_exp, del_exp),
             self.editor_box,
             pn.layout.Divider(),
-            pn.Row(validate),
+            pn.Row(validate, self.copy_re_btn, self.submit_q_btn),
+            self.submit_status,
             self.report,
             self.code,
         )
@@ -871,6 +907,38 @@ class AcquireApp:
         for w in rep.warnings:
             lines.append("- ⚠️ {}".format(w))
         self.report.object = "\n\n".join(lines)
+
+    # ---- submission seam (copy-paste now / queueserver later) ---------
+    def _submit_copy(self):
+        """Hand the generated script to the executor; for the local backend this is copy-paste."""
+        e = self.current_exp
+        if e is None:
+            self.submit_status.object = "_No experiment selected._"
+            return
+        self._render_script()
+        try:
+            sub = self.executor.submit(self.code.value)
+        except InterlockedError as exc:
+            self.submit_status.object = "❌ {}".format(exc)
+            return
+        if sub.kind == "copy":
+            # Put it on the clipboard via the code editor selection + a clear instruction.
+            self.submit_status.object = (
+                "📋 **Script ready** — select-all in the box below and copy, then paste into the "
+                "beamline IPython session and run the final `RE(...)` line. _{}_".format(sub.detail))
+            _toast("script ready to copy into the beamline session")
+        elif sub.ok:
+            self.submit_status.object = "✅ {} — {}".format(sub.text, sub.detail)
+        else:
+            self.submit_status.object = "❌ {}".format(sub.text)
+
+    def _submit_queue(self):
+        """Stub: enqueue to the queueserver (disabled until qserver exists)."""
+        try:
+            QueueServerExecutor().submit(None)
+        except NotImplementedError as exc:
+            self.submit_status.object = "⇪ queueserver not available: {}".format(exc)
+            _toast("queueserver backend is not built yet", "warning")
 
     # ==================================================================
     # assemble
