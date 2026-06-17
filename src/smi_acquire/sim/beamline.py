@@ -36,14 +36,52 @@ except Exception:  # pragma: no cover - off-beamline without bluesky/ophyd
 if _HAVE_BLUESKY:
 
     class _Stack(Device):
+        """SmarAct piezo fine stage: .x/.y/.z/.th."""
         x = Cpt(SynAxis, name="x")
         y = Cpt(SynAxis, name="y")
         z = Cpt(SynAxis, name="z")
         th = Cpt(SynAxis, name="th")
 
-    class _Waxs(Device):
-        arc = Cpt(SynAxis, name="arc")
-        bs_y = Cpt(SynAxis, name="bs_y")
+    class _HuberStage(Device):
+        """The Huber coarse ``stage`` (STG_pseudo) as on the live beamline: lab-frame x/y/z +
+        rotations theta/chi/phi, with the back-compat ``.th``/``.ph``/``.ch`` aliases the real
+        device provides. ``phi`` is the rotation axis the removed ``prs`` was repointed to."""
+        x = Cpt(SynAxis, name="x")
+        y = Cpt(SynAxis, name="y")
+        z = Cpt(SynAxis, name="z")
+        theta = Cpt(SynAxis, name="theta")
+        chi = Cpt(SynAxis, name="chi")
+        phi = Cpt(SynAxis, name="phi")
+
+        @property
+        def th(self):
+            return self.theta
+
+        @property
+        def ph(self):
+            return self.phi
+
+        @property
+        def ch(self):
+            return self.chi
+
+    class _WaxsArc(Device):
+        """Readback sub-device: ``.position`` mirrors the parent waxs setpoint."""
+        def __init__(self, *args, parent_axis=None, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._parent_axis = parent_axis
+
+        @property
+        def position(self):
+            return self._parent_axis.position if self._parent_axis is not None else 0.0
+
+    class _Waxs(SynAxis):
+        """Settable like the real SMI ``waxs`` (``bps.mv(waxs, angle)`` moves it); also exposes
+        ``.arc`` whose ``.position`` mirrors the setpoint (the real device's readback)."""
+        def __init__(self, name="waxs", **kwargs):
+            super().__init__(name=name, **kwargs)
+            self.arc = _WaxsArc(name=name + "_arc", parent_axis=self)
+            self.bs_y = SynAxis(name=name + "_bs_y")
 
     class _XBPM(Device):
         sumX = Cpt(SynSignal, func=lambda: 1000.0, name="sumX")
@@ -116,9 +154,8 @@ class SimBeamline:
         self.Signal = Signal
 
         self.piezo = _Stack(name="piezo")
-        self.stage = _Stack(name="stage")
+        self.stage = _HuberStage(name="stage")
         self.waxs = _Waxs(name="waxs")
-        self.prs = SynAxis(name="prs")
         self.energy = SynAxis(name="energy")
         self.xbpm2 = _XBPM(name="xbpm2")
         self.xbpm3 = _XBPM(name="xbpm3")
@@ -139,7 +176,7 @@ class SimBeamline:
         self.att2_12 = _Att("att2_12")
 
         # Keep the WAXS arc up so saxs_waxs_dets() keeps pil2M (SAXS) in the list.
-        self.waxs.arc.set(20).wait()
+        self.waxs.set(20).wait()
 
     # -- callable globals smi_plans expects ---------------------------------
     def det_exposure_time(self, a, b=None):
@@ -173,7 +210,7 @@ class SimBeamline:
         return {
             "np": self.np, "bps": self.bps, "bpp": self.bpp, "bp": self.bp,
             "Signal": self.Signal,
-            "piezo": self.piezo, "stage": self.stage, "waxs": self.waxs, "prs": self.prs,
+            "piezo": self.piezo, "stage": self.stage, "waxs": self.waxs,
             "energy": self.energy, "xbpm2": self.xbpm2, "xbpm3": self.xbpm3,
             "pin_diode": self.pin_diode, "pil2M": self.pil2M, "pil900KW": self.pil900KW,
             "pil300KW": self.pil300KW, "amptek": self.amptek, "rayonix": self.rayonix,

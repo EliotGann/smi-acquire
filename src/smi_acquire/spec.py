@@ -34,7 +34,7 @@ SPEC_VERSION = 2
 # Slowness hints (mirror smi_plans._compose.SPEED_*); used by the ordering guardrail.
 SPEED_FAST = 0      # piezo x/y/z, fast Signals, time frames
 SPEED_MEDIUM = 1    # incident angle, energy (DCM), potential
-SPEED_SLOW = 2      # waxs arc, prs, temperature, RH, manual swaps (in-vacuum / equilibration)
+SPEED_SLOW = 2      # waxs arc, stage.phi rotation, temperature, RH, manual swaps (slow / equilibration)
 
 
 # ---------------------------------------------------------------------------

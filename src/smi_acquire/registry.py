@@ -54,10 +54,14 @@ READS: List[DeviceInfo] = [
 
 # Motors usable as a generic `motor` axis
 MOTORS: List[DeviceInfo] = [
-    DeviceInfo("waxs",  "motor", "WAXS arc",         speed=SPEED_SLOW, note="in-vacuum; keep outer"),
-    DeviceInfo("prs",   "motor", "PRS (sample rot.)", speed=SPEED_SLOW),
-    DeviceInfo("piezo", "stack", "piezo stage (x/y/z/th)", speed=SPEED_FAST),
-    DeviceInfo("stage", "stack", "hexapod stage (x/y/z/th)", speed=SPEED_FAST),
+    DeviceInfo("waxs",      "motor", "WAXS arc",            speed=SPEED_SLOW,
+               note="in-vacuum; keep outer"),
+    DeviceInfo("stage.phi", "motor", "Huber φ (sample rotation)", speed=SPEED_SLOW,
+               note="STG_pseudo rotation axis (was 'prs'); records as stage_phi"),
+    DeviceInfo("piezo",     "stack", "piezo fine stage (x/y/z/th)",        speed=SPEED_FAST,
+               note="SmarAct; fast/precise; on top of the Huber stage"),
+    DeviceInfo("stage",     "stack", "Huber coarse stage (x/y/z/θ/χ/φ)",   speed=SPEED_FAST,
+               note="coarse range + orientation under the piezo"),
 ]
 
 ALIGNMENT_ROUTINES: List[str] = [
@@ -94,7 +98,7 @@ AXIS_KINDS: List[AxisKind] = [
     AxisKind("incidence",   "Grazing incidence angle",     SPEED_MEDIUM,
              "Visit th0 + each incident angle (grazing geometry).",
              needs=["reflection"]),
-    AxisKind("motor",       "Generic motor (arc / prs / …)", SPEED_FAST,
+    AxisKind("motor",       "Generic motor (arc / stage.φ / …)", SPEED_FAST,
              "Step any single motor through a list of positions."),
     AxisKind("spatial",     "Spatial sampling (spot / line / grid)", SPEED_FAST,
              "Fresh x/y locations — a single spot, a line, or a raster grid (innermost)."),
