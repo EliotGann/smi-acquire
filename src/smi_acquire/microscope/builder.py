@@ -105,6 +105,7 @@ class MicroscopeUI:
     stage: SampleStage
     camera: Camera
     cfg: AppConfig
+    capture_slot: pn.Column               # host fills this with capture-position controls
     _periodic: List[tuple]                # (callback, period_ms)
 
     def attach_periodic_callbacks(self) -> None:
@@ -231,7 +232,22 @@ def build_microscope(cfg: AppConfig | None = None) -> MicroscopeUI:
                          ("Beam", beam_panel.view), dynamic=False)
     scan_tabs = pn.Tabs((square.name, square.panel), (polygon.name, polygon.panel),
                         (linear.name, linear.panel), dynamic=False)
-    main_tabs = pn.Tabs((interactive.name, interactive.panel), ("Scan", scan_tabs),
+
+    # The **Move** tab folds three things that were redundant/scattered into one place:
+    #   1. ``capture_slot`` — filled by the host app with its capture-position controls
+    #      (live position, name field, "new sample here" / "assign" / "reference").
+    #   2. the single shared bookmark list (the only bookmark display).
+    #   3. the click-to-move preview controls.
+    capture_slot = pn.Column(sizing_mode="stretch_width")
+    move_tab = pn.Column(
+        capture_slot,
+        pn.layout.Divider(),
+        interactive.bookmark_panel,
+        pn.layout.Divider(),
+        interactive.move_panel,
+        sizing_mode="stretch_width",
+    )
+    main_tabs = pn.Tabs((interactive.name, move_tab), ("Scan", scan_tabs),
                         (focus.name, focus.panel), ("Setup", setup_tabs), dynamic=False)
 
     def _resolve():
@@ -276,23 +292,18 @@ def build_microscope(cfg: AppConfig | None = None) -> MicroscopeUI:
         (lambda: setattr(_js_trigger, "text", "1"), 1500),
     ]
 
-    side = pn.Column(main_tabs, width=420, height=fig.height, scroll=True)
-    # The single, shared bookmark list — pinned to the far right, used by every mode tab
-    # (the per-tab bookmark lists were redundant and have been removed).
-    bookmarks = pn.Column(
-        interactive.bookmark_panel, width=300, height=fig.height, scroll=True,
-    )
+    side = pn.Column(main_tabs, width=440, height=fig.height, scroll=True)
     layout = pn.Column(
         pn.pane.Bokeh(_js_trigger, height=0, width=0, margin=0),
         pn.pane.Bokeh(_poly_tool_trigger, height=0, width=0, margin=0),
-        pn.Row(pn.pane.Bokeh(fig, sizing_mode="stretch_width"), side, bookmarks),
+        pn.Row(pn.pane.Bokeh(fig, sizing_mode="stretch_width"), side),
         pn.layout.Divider(),
         script_panel.view,
         pn.layout.Divider(),
         status_bar.view,
     )
     return MicroscopeUI(layout=layout, interactive=interactive, stage=stage,
-                        camera=camera, cfg=cfg, _periodic=periodic)
+                        camera=camera, cfg=cfg, capture_slot=capture_slot, _periodic=periodic)
 
 
 __all__ = ["MicroscopeUI", "build_microscope"]

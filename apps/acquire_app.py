@@ -310,7 +310,10 @@ class AcquireApp:
             "_microscope starts when you open this tab…_"))
 
         self.pos_readout = pn.pane.Markdown("position: —")
-        self.capture_name = pn.widgets.TextInput(name="name", placeholder="sample name", width=160)
+        # css class "bookmark-name" lets the in-image 'b' shortcut focus this field.
+        self.capture_name = pn.widgets.TextInput(
+            name="name", placeholder="sample name", width=160,
+            css_classes=["bookmark-name"])
         new_btn = pn.widgets.Button(name="★ new sample here", button_type="primary", width=160)
         new_btn.on_click(self._on_new_here)
         assign_btn = pn.widgets.Button(name="assign → selected", width=160)
@@ -320,7 +323,9 @@ class AcquireApp:
         sync_btn = pn.widgets.Button(name="↻ markers from samples", width=180)
         sync_btn.on_click(lambda _e: self.sync_markers())
 
-        capture = pn.Column(
+        # Capture-position controls. These are folded into the microscope's **Move** tab
+        # (next to the bookmark list) once the microscope is built — see _ensure_microscope.
+        self.capture_controls = pn.Column(
             pn.pane.Markdown("### Capture position\nMove with the image, then:"),
             self.pos_readout,
             self.capture_name,
@@ -330,9 +335,9 @@ class AcquireApp:
                 "<span style='color:#777;font-size:12px'>Positioned, visible samples show as "
                 "lime markers; references as yellow. Use the **Scan** tabs for line/grid/"
                 "polygon alignment.</span>"),
-            width=380,
+            sizing_mode="stretch_width",
         )
-        self.home = pn.Row(self.micro_box, capture)
+        self.home = self.micro_box
 
     def _ensure_microscope(self):
         if self.micro is not None:
@@ -341,6 +346,9 @@ class AcquireApp:
             from smi_acquire.microscope.builder import build_microscope
             ui = build_microscope()
             self.micro = ui
+            # Fold the capture-position controls into the microscope's Move tab (combined
+            # with the bookmark list — they were redundant as a separate panel).
+            ui.capture_slot.append(self.capture_controls)
             ui.attach_periodic_callbacks()
             pn.state.add_periodic_callback(self._refresh_pos, period=500)
             self.micro_box.clear()

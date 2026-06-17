@@ -163,19 +163,18 @@ class InteractiveMode:
         self._remove_btn = pn.widgets.Button(name="remove selected", button_type="danger", width=160)
         self._remove_btn.on_click(self._on_remove)
 
-        # The single, shared bookmark list (the only bookmark display — pinned to the far
-        # right of the microscope, used by every mode). The ``scan`` column is the per-kind
-        # scan-target selection the scan modes replicate their shape onto.
+        # The single, shared bookmark list (the only bookmark display). It is folded into the
+        # **Move** tab alongside the host's capture-position controls (which provide the name
+        # field + "new sample here" capture). The ``scan`` column is the per-kind scan-target
+        # selection the scan modes replicate their shape onto.
         self.bookmark_panel = pn.Column(
             pn.pane.Markdown("### Bookmarks"),
-            self._name_input,
             self._table,
             pn.Row(self._goto_btn, self._remove_btn),
             pn.pane.Markdown(
                 "<span style='color:#888;font-size:12px'>Tick <b>scan</b> to make a bookmark a "
                 "target for the enabled scan kinds; <b>ref</b> marks a fixed landmark.</span>"
             ),
-            width=300,
         )
 
         # The Move/explore tab body (click-to-move only — the bookmark list lives on the far
