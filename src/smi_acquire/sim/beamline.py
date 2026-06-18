@@ -185,7 +185,18 @@ class SimBeamline:
     def alignement_gisaxs_hex(self, angle=0.1):
         yield from bps.mv(self.piezo.th, angle)
 
+    # All the profile's top-level GISAXS alignment routines share the same call shape
+    # (``align(angle)``); for dry-run validation they are the same simple stand-in so a
+    # generated setup() that calls any of them resolves (see registry.ALIGNMENT_ROUTINES).
     alignement_gisaxs_doblestack = alignement_gisaxs_hex
+    alignement_gisaxs_hex_short = alignement_gisaxs_hex
+    alignement_gisaxs_hex_roughsample = alignement_gisaxs_hex
+    alignment_gisaxs = alignement_gisaxs_hex
+    alignement_gisaxs_short = alignement_gisaxs_hex
+    alignement_gisaxs_rough = alignement_gisaxs_hex
+    alignement_gisaxs_multisample = alignement_gisaxs_hex
+    quickalign_gisaxs = alignement_gisaxs_hex
+    fast_align = alignement_gisaxs_hex
 
     def setDryFlow(self, v):
         yield from bps.null()
@@ -220,7 +231,15 @@ class SimBeamline:
             "att2_11": self.att2_11, "att2_12": self.att2_12,
             "det_exposure_time": self.det_exposure_time,
             "alignement_gisaxs_hex": self.alignement_gisaxs_hex,
-            "alignement_gisaxs_doblestack": self.alignement_gisaxs_hex,
+            "alignement_gisaxs_doblestack": self.alignement_gisaxs_doblestack,
+            "alignement_gisaxs_hex_short": self.alignement_gisaxs_hex_short,
+            "alignement_gisaxs_hex_roughsample": self.alignement_gisaxs_hex_roughsample,
+            "alignment_gisaxs": self.alignment_gisaxs,
+            "alignement_gisaxs_short": self.alignement_gisaxs_short,
+            "alignement_gisaxs_rough": self.alignement_gisaxs_rough,
+            "alignement_gisaxs_multisample": self.alignement_gisaxs_multisample,
+            "quickalign_gisaxs": self.quickalign_gisaxs,
+            "fast_align": self.fast_align,
             "setDryFlow": self.setDryFlow, "setWetFlow": self.setWetFlow,
             "set_humidity": self.set_humidity, "readHumidity": self.readHumidity,
             "set_potential": self.set_potential, "set_rh": self.set_rh,

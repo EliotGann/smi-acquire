@@ -64,9 +64,21 @@ MOTORS: List[DeviceInfo] = [
                note="coarse range + orientation under the piezo"),
 ]
 
+# Top-level GISAXS/GIWAXS alignment routines from the profile
+# (smi_beamline/plans/alignment.py). Each is called as ``align(angle)`` in setup().
+# NOTE: spellings are preserved EXACTLY as defined at the beamline (most are the
+# beamline's "alignement" spelling; ``alignment_gisaxs`` is the one with the standard spelling).
 ALIGNMENT_ROUTINES: List[str] = [
-    "alignement_gisaxs_hex",
-    "alignement_gisaxs_doblestack",
+    "alignement_gisaxs_hex",            # regular, hexapod (common default)
+    "alignement_gisaxs_hex_short",      # hexapod, short
+    "alignement_gisaxs_hex_roughsample",  # hexapod, rough/unflat sample
+    "alignment_gisaxs",                 # regular (non-hex)
+    "alignement_gisaxs_short",          # short (non-hex)
+    "alignement_gisaxs_rough",          # rough (non-hex)
+    "alignement_gisaxs_doblestack",     # double-stack holder
+    "alignement_gisaxs_multisample",    # align several samples in one pass
+    "quickalign_gisaxs",                # quick: reflected beam only
+    "fast_align",                       # fast height + theta re-optimize
 ]
 
 ATTENUATORS: List[str] = ["att2_9", "att2_10", "att2_11", "att2_12"]
