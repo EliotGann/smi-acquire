@@ -65,23 +65,28 @@ if _HAVE_BLUESKY:
         def ch(self):
             return self.chi
 
-    class _WaxsArc(Device):
-        """Readback sub-device: ``.position`` mirrors the parent waxs setpoint."""
-        def __init__(self, *args, parent_axis=None, **kwargs):
-            super().__init__(*args, **kwargs)
-            self._parent_axis = parent_axis
+    class _WaxsMotors(Device):
+        """The WAXS detector's motion sub-device (the real ``pil900KW.motors``).
 
-        @property
-        def position(self):
-            return self._parent_axis.position if self._parent_axis is not None else 0.0
+        On the beamline ``waxs = pil900KW.motors`` and ``pil900KW.motors.kind = 'normal'`` -- so
+        the detector ``pil900KW`` records ``.motors``' keys (``waxs_arc``/``waxs_bsx``/
+        ``waxs_bsy``), and ``waxs`` IS this same sub-device.  Reading BOTH ``pil900KW`` and
+        ``waxs`` in one event would duplicate those keys (the collision ``dedup_readables``
+        fixes).  The arc is moved via ``waxs.arc`` (``bps.mv(waxs.arc, angle)``), as on the
+        beamline -- NOT ``bps.mv(waxs, ...)``.
+        """
+        arc = Cpt(SynAxis, name="waxs_arc")
+        bs_x = Cpt(SynAxis, name="waxs_bsx")
+        bs_y = Cpt(SynAxis, name="waxs_bsy")
 
-    class _Waxs(SynAxis):
-        """Settable like the real SMI ``waxs`` (``bps.mv(waxs, angle)`` moves it); also exposes
-        ``.arc`` whose ``.position`` mirrors the setpoint (the real device's readback)."""
-        def __init__(self, name="waxs", **kwargs):
-            super().__init__(name=name, **kwargs)
-            self.arc = _WaxsArc(name=name + "_arc", parent_axis=self)
-            self.bs_y = SynAxis(name=name + "_bs_y")
+    class _WaxsDetector(Device):
+        """Stand-in for the SMI ``pil900KW`` WAXS area detector.
+
+        Has a readable image stat (``stats``) AND a ``motors`` sub-device it records (kind
+        normal), so it reports ``waxs_arc`` etc. -- the parent/child key overlap with ``waxs``.
+        """
+        stats = Cpt(SynSignal, func=lambda: 1.0, name="stats")
+        motors = Cpt(_WaxsMotors, name="motors")
 
     class _XBPM(Device):
         sumX = Cpt(SynSignal, func=lambda: 1000.0, name="sumX")
@@ -155,14 +160,20 @@ class SimBeamline:
 
         self.piezo = _Stack(name="piezo")
         self.stage = _HuberStage(name="stage")
-        self.waxs = _Waxs(name="waxs")
         self.energy = SynAxis(name="energy")
         self.xbpm2 = _XBPM(name="xbpm2")
         self.xbpm3 = _XBPM(name="xbpm3")
         self.pin_diode = _PinDiode(name="pin_diode")
         self.pil2M = _AreaDet(name="pil2M")
         self.pil2M.motor = _DetMotor(name="pil2M_motor")
-        self.pil900KW = Syn2DGauss("pil900KW", motor, "motor", motor, "motor", center=0, Imax=1)
+        # WAXS detector + its motion sub-device; ``waxs`` IS ``pil900KW.motors`` (beamline wiring
+        # ``waxs = pil900KW.motors``).  ``motors`` is recorded by the detector (kind normal), so
+        # reading both pil900KW and waxs in one event collides on waxs_arc/_bsx/_bsy unless
+        # de-duplicated -- the case smi_plans dedup_readables handles.  The arc is moved via
+        # ``waxs.arc`` (NOT ``bps.mv(waxs, ...)``).
+        self.pil900KW = _WaxsDetector(name="pil900KW")
+        self.pil900KW.motors.kind = "normal"
+        self.waxs = self.pil900KW.motors
         self.pil300KW = Syn2DGauss("pil300KW", motor, "motor", motor, "motor", center=0, Imax=1)
         self.amptek = Syn2DGauss("amptek", motor, "motor", motor, "motor", center=0, Imax=1)
         self.rayonix = Syn2DGauss("rayonix", motor, "motor", motor, "motor", center=0, Imax=1)
@@ -176,7 +187,8 @@ class SimBeamline:
         self.att2_12 = _Att("att2_12")
 
         # Keep the WAXS arc up so saxs_waxs_dets() keeps pil2M (SAXS) in the list.
-        self.waxs.set(20).wait()
+        # The arc is moved via ``waxs.arc`` (= pil900KW.motors.arc), as on the beamline.
+        self.waxs.arc.set(20).wait()
 
     # -- callable globals smi_plans expects ---------------------------------
     def det_exposure_time(self, a, b=None):

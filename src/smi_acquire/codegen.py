@@ -138,7 +138,7 @@ def _render_axis(axis: AxisSpec, *, aligned: bool = False) -> str:
         return "incidence_axis(piezo.th, {}, {})".format(th0, _numlist(axis.values()))
     if t == "motor":
         name = p.get("name", "motor")
-        device = p.get("device", "waxs")
+        device = p.get("device", "waxs.arc")   # the WAXS arc is waxs.arc, NOT waxs
         speed = SPEED_CONST.get(int(p.get("speed", 0)), "SPEED_FAST")
         return "motor_axis({!r}, {}, {}, speed={})".format(
             name, device, _numlist(axis.values()), speed)
@@ -389,7 +389,7 @@ def _axis_to_qspec(axis: AxisSpec) -> dict:
         out["values"] = axis.values()
     elif t == "motor":
         out["name"] = p.get("name", "motor")
-        out["device"] = p.get("device", "waxs")
+        out["device"] = p.get("device", "waxs.arc")   # the WAXS arc is waxs.arc, NOT waxs
         out["values"] = axis.values()
         out["speed"] = int(p.get("speed", 0))
     elif t == "spatial":

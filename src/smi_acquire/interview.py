@@ -230,7 +230,8 @@ def axis_param_schema(axis_type: str) -> List[Field]:
     if axis_type == "motor":
         return [
             Field("name", "Axis label", "text", "arc"),
-            Field("device", "Device (registry name)", "text", "waxs"),
+            Field("device", "Device (registry name)", "text", "waxs.arc",
+                  help="The WAXS arc is waxs.arc (NOT waxs). Other motors: stage.phi, piezo.x …"),
             Field("values", "Positions", "floatlist", [0, 20]),
             Field("speed", "Slowness (0 fast … 2 slow)", "int", SPEED_SLOW),
         ]

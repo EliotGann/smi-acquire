@@ -54,8 +54,9 @@ READS: List[DeviceInfo] = [
 
 # Motors usable as a generic `motor` axis
 MOTORS: List[DeviceInfo] = [
-    DeviceInfo("waxs",      "motor", "WAXS arc",            speed=SPEED_SLOW,
-               note="in-vacuum; keep outer"),
+    DeviceInfo("waxs.arc",  "motor", "WAXS arc",            speed=SPEED_SLOW,
+               note="in-vacuum; keep outer. The settable arc is waxs.arc (NOT waxs; "
+                    "waxs = pil900KW.motors is a readable). waxs stays in reads."),
     DeviceInfo("stage.phi", "motor", "Huber φ (sample rotation)", speed=SPEED_SLOW,
                note="STG_pseudo rotation axis (was 'prs'); records as stage_phi"),
     DeviceInfo("piezo",     "stack", "piezo fine stage (x/y/z/th)",        speed=SPEED_FAST,

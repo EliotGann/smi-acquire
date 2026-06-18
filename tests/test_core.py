@@ -12,7 +12,8 @@ import ast
 import pytest
 
 from smi_acquire import interview, codegen, registry
-from smi_acquire.spec import AxisSpec, ExperimentSpec, energy_grid_values
+from smi_acquire.spec import (AxisSpec, BeamSpec, ExperimentSpec, SamplesSpec,
+                              energy_grid_values)
 
 
 # ---------------------------------------------------------------------------
@@ -223,3 +224,47 @@ def test_dryrun_one_run_per_sample():
     assert rep.ok, rep.error
     assert rep.runs == sp.n_samples()
     assert rep.events == sp.total_events()
+
+
+def test_dryrun_grid_with_waxs_reads_no_collision():
+    """The WAXS data-key collision: a grid scan with waxs in reads + pil900KW det must NOT raise
+    'Data keys collide' -- acquire de-dups (waxs IS pil900KW.motors). The dry-run sim now
+    faithfully reproduces the overlap so this would catch a regression."""
+    pytest.importorskip("bluesky")
+    pytest.importorskip("ophyd")
+    from smi_acquire import dryrun
+    sp = ExperimentSpec(
+        scan_name="map",
+        beam=BeamSpec(arc_aware=True, reads=["energy", "waxs", "xbpm2", "xbpm3"]),
+        axes=[AxisSpec(type="spatial",
+                       params={"x": [0, 30, 60], "y": [0, 30], "snake": True,
+                               "motor_object": "piezo"})],
+        samples=SamplesSpec(rows=[{"name": "s1", "piezo_x": 1.0}]))
+    rep = dryrun.dry_run(sp)
+    if rep.error and "smi_plans not importable" in rep.error:
+        pytest.skip("smi_plans not available")
+    assert rep.ok, rep.error
+    assert rep.runs == 1
+    assert rep.events == 6      # 3x2 grid
+
+
+def test_dryrun_arc_axis_uses_waxs_arc():
+    """A WAXS-arc motor axis moves waxs.arc (NOT waxs, which is not movable)."""
+    pytest.importorskip("bluesky")
+    pytest.importorskip("ophyd")
+    from smi_acquire import codegen, dryrun
+    sp = ExperimentSpec(
+        scan_name="arc", beam=BeamSpec(arc_aware=True),
+        axes=[AxisSpec(type="motor",
+                       params={"name": "arc", "device": "waxs.arc",
+                               "values": [0, 20], "speed": 2})],
+        samples=SamplesSpec(rows=[{"name": "s1", "piezo_x": 1.0}]))
+    src = codegen.render(sp)
+    assert "motor_axis('arc', waxs.arc," in src
+    assert "motor_axis('arc', waxs," not in src     # never the bare waxs
+    rep = dryrun.dry_run(sp)
+    if rep.error and "smi_plans not importable" in rep.error:
+        pytest.skip("smi_plans not available")
+    assert rep.ok, rep.error
+    assert rep.events == 2
+
