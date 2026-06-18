@@ -1,10 +1,13 @@
 """Motor jog and absolute-move panel.
 
-Three rows of controls (X, Y, Z) with:
+Rows of controls (one per axis) with:
 - jog ± buttons (using a per-axis step input)
 - live readback display
 - absolute-move input
 - a "moving" indicator that lights while a motion is in flight
+
+The full stacked stage is shown in two sections — the piezo fine stage (µm) and the Huber
+coarse stage (mm) — each with its own units. Moves route through the executor (interlock-gated).
 """
 
 from __future__ import annotations
@@ -14,6 +17,12 @@ from ophyd import EpicsMotor
 
 from ..config import AppConfig
 from ..devices import SampleStage
+
+
+# Per-stack display: axis order, the section's units, and a sensible default jog step.
+_PIEZO_AXES = (("x", "X"), ("y", "Y"), ("z", "Z (focus)"), ("th", "θ"), ("chi", "χ"))
+_HUBER_AXES = (("x", "X"), ("y", "Y"), ("z", "Z"),
+               ("theta", "θ"), ("chi", "χ"), ("phi", "φ"))
 
 
 def _axis_row(
@@ -101,36 +110,58 @@ class MotorPanel:
         self.cfg = cfg
         self.executor = executor
 
-        default_step = cfg.ui.default_step
-        units = cfg.ui.motor_units
-        # Pick a sensible up/down-arrow increment based on units. Users can still type any
-        # value; this just sets the +/- step in the numeric input.
-        increment = 1.0 if units.lower() in ("um", "µm", "micron", "microns") else 0.001
-        self._row_x, self._step_x, self._rb_x = _axis_row(
-            stage.x, "X", default_step, units, increment, executor)
-        self._row_y, self._step_y, self._rb_y = _axis_row(
-            stage.y, "Y", default_step, units, increment, executor)
-        self._row_z, self._step_z, self._rb_z = _axis_row(
-            stage.z, "Z (focus)", default_step, units, increment, executor)
+        # (motor, readback_widget) pairs to refresh each tick, across all sections.
+        self._readbacks: list = []
+        # Back-compat handles for the primary x/y/z step inputs (used by steps_mm()).
+        self._step_x = self._step_y = self._step_z = None
 
-        self.view = pn.Column(
-            pn.pane.Markdown("### Motors"),
-            self._row_x,
-            self._row_y,
-            self._row_z,
-            sizing_mode="stretch_width",
-        )
+        sections = []
+        piezo_units = cfg.ui.motor_units            # the on-axis primary units (µm at SMI)
+        sections.append(self._build_section(
+            "Piezo (fine)", getattr(stage, "piezo", None), _PIEZO_AXES, piezo_units,
+            fallback={"x": stage.x, "y": stage.y, "z": stage.z}))
+        # The Huber coarse stage is mm regardless of the piezo's units.
+        huber_units = "mm"
+        sections.append(self._build_section(
+            "Huber (coarse)", getattr(stage, "huber", None), _HUBER_AXES, huber_units))
+
+        self.view = pn.Column(pn.pane.Markdown("### Motors"),
+                              *[s for s in sections if s is not None],
+                              sizing_mode="stretch_width")
+
+    def _build_section(self, title, group, axes, units, fallback=None):
+        """A titled block of axis rows for one stack; returns None if no axes are present."""
+        fallback = fallback or {}
+        is_um = units.lower() in ("um", "µm", "micron", "microns")
+        default_step = self.cfg.ui.default_step if is_um else 0.01
+        increment = 1.0 if is_um else 0.001
+
+        rows = []
+        for axis, label in axes:
+            motor = getattr(group, axis, None) if group is not None else fallback.get(axis)
+            if motor is None:
+                continue
+            row, step, rb = _axis_row(motor, label, default_step, units, increment, self.executor)
+            rows.append(row)
+            self._readbacks.append((motor, rb))
+            # Keep primary x/y/z step handles for the legacy steps_mm() accessor.
+            if title.startswith("Piezo") and axis in ("x", "y", "z"):
+                setattr(self, f"_step_{axis}", step)
+        if not rows:
+            return None
+        return pn.Column(
+            pn.pane.Markdown(f"**{title}** · _{units}_"), *rows,
+            styles={"background": "#f6f8fa", "padding": "4px 8px", "border-radius": "6px"},
+            margin=(0, 0, 8, 0))
 
     def refresh_readbacks(self) -> None:
-        for motor, rb in (
-            (self.stage.x, self._rb_x),
-            (self.stage.y, self._rb_y),
-            (self.stage.z, self._rb_z),
-        ):
+        for motor, rb in self._readbacks:
             try:
                 rb.value = f"{motor.position:+.4f}"
             except Exception:
                 rb.value = "—"
 
     def steps_mm(self) -> tuple[float, float, float]:
-        return float(self._step_x.value), float(self._step_y.value), float(self._step_z.value)
+        def _v(w):
+            return float(w.value) if w is not None else 0.0
+        return _v(self._step_x), _v(self._step_y), _v(self._step_z)

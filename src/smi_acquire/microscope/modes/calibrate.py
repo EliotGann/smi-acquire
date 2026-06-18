@@ -209,7 +209,26 @@ class CalibrateMode:
         self._reject_btn.disabled = True
         self._current_matrix_view.object = self._fmt_matrix(
             "current", self._active_calibration().matrix)
-        self._status.value = "calibrating the {} stack (fit at χ = 0).".format(self._cal_stack)
+        self._apply_step_units()
+        self._status.value = "calibrating the {} stack (fit at χ = 0, step in {}).".format(
+            self._cal_stack, self._step_units())
+
+    def _step_units(self) -> str:
+        """The motor units for the active calibration stack (piezo from config; Huber = mm)."""
+        if self._cal_stack == "huber":
+            return "mm"
+        return self.cfg.ui.motor_units
+
+    def _apply_step_units(self) -> None:
+        """Re-label + re-range the step field to match the selected stack's units."""
+        units = self._step_units()
+        is_um = units.lower() in ("um", "µm", "micron", "microns")
+        self._step_mm.name = f"step ({units})"
+        # Sensible defaults: ~200 µm for the piezo, ~0.2 mm for the Huber.
+        self._step_mm.start = (10.0 if is_um else 0.005)
+        self._step_mm.end = (5000.0 if is_um else 5.0)
+        self._step_mm.step = (10.0 if is_um else 0.05)
+        self._step_mm.value = (200.0 if is_um else 0.2)
 
     def _active_motors(self):
         """The (x, y) motors of the stack being calibrated (piezo primary, or Huber)."""
@@ -252,7 +271,7 @@ class CalibrateMode:
 
     async def _do_calibration(self) -> None:
         step = float(self._step_mm.value or 0.0)
-        units = self.cfg.ui.motor_units
+        units = self._step_units()
         if step <= 0:
             _doc_safe(lambda: setattr(self._status, "value", f"step must be > 0 ({units})"))
             return

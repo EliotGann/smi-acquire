@@ -203,6 +203,9 @@ class AcquireApp:
         self._refresh_store_status()
         self.spine_count = pn.pane.Markdown("")
         self._refresh_spine_count()
+        # Full captured position of the selected sample (all piezo_* + stage_* axes).
+        self.sample_detail = pn.pane.Markdown("_select a sample to see its full position_")
+        self.spine.param.watch(lambda _e: self._refresh_sample_detail(), "selection")
         self.spine_panel = pn.Column(
             pn.pane.Markdown("### Sample list"),
             self.store_status,
@@ -210,6 +213,7 @@ class AcquireApp:
             self.spine,
             pn.Row(add, rm),
             pn.Row(load),
+            self.sample_detail,
             pn.layout.Divider(),
             pn.pane.Markdown("**Holders**"),
             pn.Row(new_holder, mk_holder),
@@ -252,6 +256,7 @@ class AcquireApp:
             self.capture_holder.options = self._holder_options()
         self._refresh_store_status()
         self._refresh_spine_count()
+        self._refresh_sample_detail()
         if hasattr(self, "target_select"):
             self.target_select.options = self._target_options()
         self.sync_markers()
@@ -281,6 +286,44 @@ class AcquireApp:
         if not sel or sel[0] >= len(self._spine_ids):
             return None
         return self.store.sample_by_id(self._spine_ids[sel[0]])
+
+    # Position-field display: label + units (piezo µm, Huber mm/deg).
+    _POS_FIELDS = [
+        ("piezo_x", "piezo x", "µm"), ("piezo_y", "piezo y", "µm"),
+        ("piezo_z", "piezo z", "µm"), ("piezo_th", "piezo θ", "°"),
+        ("piezo_chi", "piezo χ", "°"),
+        ("stage_x", "huber x", "mm"), ("stage_y", "huber y", "mm"),
+        ("stage_z", "huber z", "mm"), ("stage_theta", "huber θ", "°"),
+        ("stage_chi", "huber χ", "°"), ("stage_phi", "huber φ", "°"),
+    ]
+
+    def _fmt_position(self, pos):
+        """One-line summary of the set axes of a Position (with units)."""
+        if pos is None:
+            return "—"
+        bits = []
+        for field, label, unit in self._POS_FIELDS:
+            v = getattr(pos, field, None)
+            if v is not None:
+                bits.append(f"{label} {v:g}{unit}")
+        ia = list(getattr(pos, "incident_angles", []) or [])
+        if ia:
+            bits.append("ai " + " ".join(f"{a:g}" for a in ia))
+        return " · ".join(bits) if bits else "_(no axes set)_"
+
+    def _refresh_sample_detail(self):
+        """Surface the full captured position (all axes) of the selected sample."""
+        if not hasattr(self, "sample_detail"):
+            return
+        s = self._selected_sample()
+        if s is None:
+            self.sample_detail.object = "_select a sample to see its full position_"
+            return
+        lines = [f"**{s.name}** — full captured position",
+                 "nominal: " + self._fmt_position(s.nominal)]
+        if s.refined is not None:
+            lines.append("refined ✓: " + self._fmt_position(s.refined))
+        self.sample_detail.object = "  \n".join(lines)
 
     def _on_spine_edit(self, event):
         i = int(getattr(event, "row", -1))
