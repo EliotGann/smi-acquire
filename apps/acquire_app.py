@@ -28,9 +28,9 @@ import json
 import pandas as pd
 import panel as pn
 
-from smi_acquire import interview, codegen, dryrun, registry
-from smi_acquire.interview import axis_param_schema, default_axis, reorder_axes_by_speed
-from smi_acquire.project import Project, Experiment, Target, Reference
+from smi_acquire import codegen, dryrun, registry
+from smi_acquire.interview import axis_param_schema, default_axis
+from smi_acquire.project import Project, Experiment, Reference
 from smi_acquire.store import AcquireStore
 from smi_acquire.execute import LocalExecutor, QueueServerExecutor, InterlockedError
 from smi_acquire.interlock import Interlock
@@ -82,6 +82,57 @@ def _toast(msg, kind="info"):
         getattr(pn.state.notifications, kind)(msg, duration=3000)
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# wizard visual helpers (iconic cards, pills, color tints)
+# ---------------------------------------------------------------------------
+_SPEED_LABEL = {0: "fast", 1: "med", 2: "slow"}
+_SPEED_BG = {0: "#66BB6A", 1: "#FFB74D", 2: "#EF5350"}
+
+
+def _tint(color, alpha="22"):
+    """A low-alpha version of a ``#RRGGBB`` color for soft backgrounds."""
+    c = (color or "#607D8B").strip()
+    if len(c) == 7 and c.startswith("#"):
+        return c + alpha
+    return c
+
+
+def _pill(text, bg, fg="#fff"):
+    return ("<span style='display:inline-block;padding:1px 8px;border-radius:10px;"
+            "background:{};color:{};font-size:11px;font-weight:600;"
+            "white-space:nowrap'>{}</span>").format(bg, fg, text)
+
+
+def _speed_pill(speed):
+    return _pill(_SPEED_LABEL.get(int(speed), "?"), _SPEED_BG.get(int(speed), "#90A4AE"))
+
+
+def _icon_card_button(icon, label, color, selected, *, sub="", width=215, height=120):
+    """A big iconic selectable card rendered as a styled Button (Panel buttons render unicode).
+
+    Selected → filled with ``color``; unselected → outlined/gray. Returns the Button so the
+    caller can wire ``.on_click``.
+    """
+    name = "{}\n{}".format(icon, label)
+    if sub:
+        name += "\n{}".format(sub)
+    if selected:
+        sheet = (":host {{ }} .bk-btn, button {{"
+                 "background: {col} !important; color: #fff !important;"
+                 "border: 2px solid {col} !important; border-radius: 12px !important;"
+                 "font-size: 13px !important; font-weight: 600 !important;"
+                 "white-space: pre-line !important; line-height: 1.5 !important;"
+                 "box-shadow: 0 2px 8px {col}55 !important; }}").format(col=color)
+    else:
+        sheet = (".bk-btn, button {"
+                 "background: #fff !important; color: #455A64 !important;"
+                 "border: 2px solid #CFD8DC !important; border-radius: 12px !important;"
+                 "font-size: 13px !important; font-weight: 500 !important;"
+                 "white-space: pre-line !important; line-height: 1.5 !important; }")
+    return pn.widgets.Button(name=name, width=width, height=height,
+                             stylesheets=[sheet], margin=(6, 8, 6, 0))
 
 
 # ===========================================================================
@@ -582,48 +633,534 @@ class AcquireApp:
         _toast("added reference '{}'".format(name))
 
     # ==================================================================
-    # PLAN — Experiment
+    # PLAN — the visual scan-building WIZARD
     # ==================================================================
-    def _build_plan(self):
-        self.exp_select = pn.widgets.Select(name="Experiment", options=self._exp_options(), width=240)
-        self.exp_select.param.watch(self._on_pick_exp, "value")
-        new_exp = pn.widgets.Button(name="+ new experiment", width=150)
-        new_exp.on_click(self._on_new_exp)
-        del_exp = pn.widgets.Button(name="✕ delete", button_type="danger", width=90)
-        del_exp.on_click(self._on_del_exp)
-
-        self.editor_box = pn.Column()
-        self.code = pn.widgets.CodeEditor(language="python", theme="monokai", height=380,
+    def _build_wizard(self):
+        """Create the wizard state + its container, seeding from the current experiment if any."""
+        from smi_acquire.wizard import WizardState
+        if self.current_exp is not None:
+            self.wizard = WizardState.from_experiment(self.current_exp)
+        else:
+            self.wizard = WizardState()
+        self.wizard_box = pn.Column(sizing_mode="stretch_width")
+        self._wiz_edit_open = {}   # axis_type -> bool (inline-edit toggles in Compose)
+        # Shared script/dry-run/submit widgets (reused by the Review step).
+        self.code = pn.widgets.CodeEditor(language="python", theme="monokai", height=360,
                                           readonly=True, sizing_mode="stretch_width")
-        validate = pn.widgets.Button(name="Validate (dry-run)", button_type="primary", width=180)
-        validate.on_click(lambda _e: self._validate())
         self.report = pn.pane.Markdown("")
-
-        # Submission seam: copy the RE(...) script to paste into the beamline session (now), or
-        # submit to the queueserver (stub — qserver is not in use yet, so this is disabled).
-        self.copy_re_btn = pn.widgets.Button(
-            name="⧉ Copy RE command", button_type="success", width=200)
-        self.copy_re_btn.on_click(lambda _e: self._submit_copy())
-        self.submit_q_btn = pn.widgets.Button(
-            name="⇪ Submit to queue (qserver — N/A)", button_type="default", width=260,
-            disabled=True)
-        self.submit_q_btn.on_click(lambda _e: self._submit_queue())
         self.submit_status = pn.pane.Markdown("")
+        self._render_wizard()
 
-        self.plan = pn.Column(
-            pn.pane.Markdown("## Build a scan recipe → target a holder"),
-            pn.Row(self.exp_select, new_exp, del_exp),
-            self.editor_box,
-            pn.layout.Divider(),
-            pn.Row(validate, self.copy_re_btn, self.submit_q_btn),
-            self.submit_status,
-            self.report,
-            self.code,
-        )
-        if self.project.experiments:
-            self.current_exp = self.project.experiments[0]
-        self._render_editor()
+    # ---- top-level renderer: chrome + the active step -------------------
+    def _render_wizard(self):
+        self.wizard_box.clear()
+        st = self.wizard
+        body = {
+            "measure": self._wiz_measure,
+            "change": self._wiz_change,
+            "configure": self._wiz_configure,
+            "compose": self._wiz_compose,
+            "review": self._wiz_review,
+        }[st.step]()
+        self.wizard_box.extend([self._wiz_rail(), body, self._wiz_nav()])
 
+    # ---- progress rail (clickable past steps) --------------------------
+    def _wiz_rail(self):
+        from smi_acquire import wizard
+        st = self.wizard
+        pills = []
+        for i, key in enumerate(wizard.STEPS):
+            label = "{} {}".format(wizard.STEP_ICONS[key], wizard.STEP_TITLES[key])
+            reachable = i <= st.step_index
+            if i == st.step_index:
+                sheet = (".bk-btn, button { background:%s !important; color:#fff !important;"
+                         "border:none !important; border-radius:16px !important;"
+                         "font-weight:700 !important; }" % ACCENT)
+            elif reachable:
+                sheet = (".bk-btn, button { background:#E3F2FD !important; color:%s !important;"
+                         "border:1px solid %s !important; border-radius:16px !important; }"
+                         % (ACCENT, ACCENT))
+            else:
+                sheet = (".bk-btn, button { background:#ECEFF1 !important; color:#B0BEC5 "
+                         "!important; border:none !important; border-radius:16px !important; }")
+            b = pn.widgets.Button(name=label, height=34, stylesheets=[sheet],
+                                  disabled=(i > st.step_index), margin=(0, 4, 0, 0))
+            b.on_click(lambda _e, idx=i: self._wiz_goto(idx))
+            pills.append(b)
+        return pn.Column(pn.Row(*pills, sizing_mode="stretch_width"),
+                         pn.layout.Divider(), margin=(0, 0, 4, 0))
+
+    def _wiz_goto(self, idx):
+        self.wizard.goto(idx)
+        self._render_wizard()
+
+    # ---- bottom Back / Next chrome -------------------------------------
+    def _wiz_nav(self):
+        from smi_acquire import wizard
+        st = self.wizard
+        back = pn.widgets.Button(name="← Back", width=110, disabled=(st.step_index == 0))
+        back.on_click(lambda _e: self._wiz_back())
+        reset = pn.widgets.Button(name="↺ start over", button_type="warning", width=130)
+        reset.on_click(lambda _e: self._wiz_reset())
+        right = [pn.layout.HSpacer(), reset]
+        if st.step_index < len(wizard.STEPS) - 1:
+            nxt = pn.widgets.Button(name="Next →", button_type="primary", width=120,
+                                    disabled=not st.can_advance())
+            nxt.on_click(lambda _e: self._wiz_next())
+            right.append(nxt)
+        return pn.Column(pn.layout.Divider(),
+                         pn.Row(back, *right, sizing_mode="stretch_width"))
+
+    def _wiz_next(self):
+        self.wizard.next()
+        self._render_wizard()
+
+    def _wiz_back(self):
+        self.wizard.back()
+        self._render_wizard()
+
+    def _wiz_reset(self):
+        from smi_acquire.wizard import WizardState
+        self.wizard = WizardState()
+        self._render_wizard()
+        _toast("wizard reset")
+
+    # ==================================================================
+    # STEP 1 — Measure
+    # ==================================================================
+    def _wiz_measure(self):
+        from smi_acquire import wizard
+        st = self.wizard
+        col = pn.Column(pn.pane.HTML("<h2>🔬 What do you want to measure?</h2>"),
+                        sizing_mode="stretch_width")
+
+        # Geometry cards
+        col.append(pn.pane.HTML("<b>Geometry</b> — how the beam hits the sample"))
+        geo_row = pn.Row()
+        for g in wizard.GEOMETRIES:
+            sel = (st.geometry == g.value)
+            card = _icon_card_button(g.icon, g.label, ACCENT, sel, sub=g.blurb,
+                                     width=300, height=130)
+            card.on_click(lambda _e, v=g.value: self._wiz_set_geometry(v))
+            geo_row.append(card)
+        col.append(geo_row)
+
+        # Q-range cards
+        col.append(pn.pane.HTML("<b>q-range / detectors</b>"))
+        q_row = pn.Row()
+        for q in wizard.Q_RANGES:
+            sel = (st.q == q.value)
+            card = _icon_card_button(q.icon, q.label, "#5C6BC0", sel,
+                                     sub=", ".join(q.detectors), width=230, height=120)
+            card.on_click(lambda _e, v=q.value: self._wiz_set_q(v))
+            q_row.append(card)
+        col.append(q_row)
+
+        # Exposure + names
+        exp = pn.widgets.FloatInput(name="Exposure (s)", value=float(st.exposure_s),
+                                    step=0.1, width=140)
+        exp.param.watch(lambda e: self._wiz_assign("exposure_s", float(e.new)), "value")
+        proj = pn.widgets.TextInput(name="Project name (optional)", value=st.project_name,
+                                    width=220)
+        proj.param.watch(lambda e: self._wiz_assign("project_name", e.new), "value")
+        scan = pn.widgets.TextInput(name="Scan name (optional)", value=st.scan_name, width=220)
+        scan.param.watch(lambda e: self._wiz_assign("scan_name", e.new), "value")
+        col.append(pn.Row(exp, proj, scan))
+
+        # Reflection-only: alignment in setup
+        if st.geometry == "reflection":
+            align_box = pn.Column(
+                pn.pane.HTML("<b>📐 Alignment in setup?</b> (grazing geometry)"),
+                styles={"background": _tint("#26A69A"), "padding": "8px 12px",
+                        "border-radius": "10px", "border-left": "4px solid #26A69A"})
+            routines = {"(none)": None, **{r: r for r in registry.ALIGNMENT_ROUTINES}}
+            al = pn.widgets.Select(name="Alignment routine", options=routines,
+                                   value=st.align_routine, width=300)
+            al.param.watch(lambda e: self._wiz_assign("align_routine", e.new), "value")
+            ang = pn.widgets.FloatInput(name="Align angle (deg)", value=float(st.align_angle),
+                                        step=0.05, width=150)
+            ang.param.watch(lambda e: self._wiz_assign("align_angle", float(e.new)), "value")
+            align_box.append(pn.Row(al, ang))
+            col.append(align_box)
+
+        # Advanced: reads + attenuators
+        reads = pn.widgets.MultiChoice(name="Record per event (reads)",
+                                       options=registry.read_names(), value=list(st.reads))
+        reads.param.watch(lambda e: self._wiz_assign("reads", list(e.new)), "value")
+        atts = pn.widgets.MultiChoice(name="Attenuators in", options=registry.ATTENUATORS,
+                                      value=list(st.attenuators_in))
+        atts.param.watch(lambda e: self._wiz_assign("attenuators_in", list(e.new)), "value")
+        col.append(pn.Card(reads, atts, title="Advanced (reads / attenuators)",
+                           collapsed=True, sizing_mode="stretch_width"))
+        return col
+
+    def _wiz_set_geometry(self, value):
+        self.wizard.geometry = value
+        self._render_wizard()
+
+    def _wiz_set_q(self, value):
+        st = self.wizard
+        st.q = value
+        st.reads = list(st.beam_spec().reads)   # mirror q→reads defaults
+        self._render_wizard()
+
+    def _wiz_assign(self, attr, value):
+        """Set a scalar wizard attribute without a full re-render (avoids losing focus)."""
+        setattr(self.wizard, attr, value)
+
+    # ==================================================================
+    # STEP 2 — Change (iconic toggle cards)
+    # ==================================================================
+    def _wiz_change(self):
+        from smi_acquire import wizard
+        st = self.wizard
+        col = pn.Column(
+            pn.pane.HTML("<h2>🎛️ What do you want to change?</h2>"
+                         "<span style='color:#777'>Pick the quantities to vary — each becomes "
+                         "a nested scan layer. Zero is fine (a single point per sample).</span>"),
+            sizing_mode="stretch_width")
+        grid = pn.FlexBox(sizing_mode="stretch_width")
+        for kind in wizard.changeables():
+            on = st.has_change(kind.type)
+            label = ("✓ " if on else "") + kind.label
+            card = _icon_card_button(kind.icon, label, kind.color, on,
+                                     sub=kind.blurb, width=235, height=150)
+            card.on_click(lambda _e, t=kind.type: self._wiz_toggle(t))
+            wrap = pn.Column(card, pn.pane.HTML(
+                "<div style='margin:-4px 0 6px 2px'>{} {}</div>".format(
+                    _speed_pill(kind.speed), self._needs_badge(kind))))
+            grid.append(wrap)
+        col.append(grid)
+        col.append(pn.pane.HTML(
+            "<div style='margin-top:8px;color:#555'>Currently changing: <b>{}</b></div>".format(
+                ", ".join(a.type for a in st.axes) or "nothing (single point)")))
+        return col
+
+    def _needs_badge(self, kind):
+        """A small note if this kind's prerequisites are not satisfied (still togglable)."""
+        st = self.wizard
+        msgs = []
+        for need in kind.needs:
+            if need == "reflection" and st.geometry != "reflection":
+                msgs.append("needs grazing geometry")
+            elif need == "heater":
+                msgs.append("adds a heater")
+        if not msgs:
+            return ""
+        return ("<span style='color:#E65100;font-size:11px'>⚠ {}</span>"
+                .format("; ".join(msgs)))
+
+    def _wiz_toggle(self, axis_type):
+        self.wizard.toggle_change(axis_type)
+        self._render_wizard()
+
+    # ==================================================================
+    # STEP 3 — Configure each change
+    # ==================================================================
+    def _wiz_configure(self):
+        st = self.wizard
+        col = pn.Column(pn.pane.HTML("<h2>🎚️ Configure each change</h2>"),
+                        sizing_mode="stretch_width")
+        if not st.axes:
+            col.append(pn.pane.Alert(
+                "Nothing to configure — you're measuring a single point per sample. "
+                "Go **Next**.", alert_type="success"))
+            return col
+        for i, ax in enumerate(st.axes):
+            col.append(self._wiz_config_card(i, ax))
+        col.append(pn.pane.HTML(
+            "<div style='color:#555'><b>{:,} events per sample</b></div>".format(
+                st.events_per_sample())))
+        return col
+
+    def _wiz_config_card(self, i, ax):
+        kind = registry.AXIS_KIND_BY_TYPE.get(ax.type)
+        color = kind.color if kind else "#607D8B"
+        icon = kind.icon if kind else "●"
+        label = kind.label if kind else ax.type
+        header = pn.pane.HTML(
+            "<div style='background:{c};color:#fff;padding:6px 12px;border-radius:8px 8px 0 0;"
+            "font-weight:600'>{ic} {lab} &nbsp;·&nbsp; {n} pts</div>".format(
+                c=color, ic=icon, lab=label, n=ax.n_points()))
+        fields = pn.Column(margin=(0, 0, 0, 0))
+        # spatial: offer the shape selector first (recomputes x/y on change)
+        if ax.type == "spatial":
+            shape = self._spatial_shape(ax)
+            sh = pn.widgets.RadioButtonGroup(
+                name="Shape", options=["spot", "line", "grid"], value=shape)
+            sh.param.watch(lambda e, idx=i: self._wiz_set_shape(idx, e.new), "value")
+            fields.append(pn.Row(pn.pane.HTML("<b>Shape</b>"), sh))
+        for f in axis_param_schema(ax.type):
+            fields.append(self._param_widget(ax, f, None, self._render_wizard))
+        return pn.Column(
+            header,
+            pn.Column(fields, styles={"background": _tint(color, "14"),
+                                      "padding": "8px 12px",
+                                      "border-radius": "0 0 8px 8px",
+                                      "border": "1px solid " + _tint(color, "55")}),
+            margin=(0, 0, 12, 0), sizing_mode="stretch_width")
+
+    @staticmethod
+    def _spatial_shape(ax):
+        p = ax.params
+        has_y = bool(p.get("y"))
+        nx = len(p.get("x", []) or [])
+        if has_y:
+            return "grid"
+        if nx > 6:
+            return "line"
+        return "spot"
+
+    def _wiz_set_shape(self, i, shape):
+        st = self.wizard
+        if 0 <= i < len(st.axes) and st.axes[i].type == "spatial":
+            new = default_axis("spatial", shape=shape)
+            st.axes[i].params = new.params
+        self._render_wizard()
+
+    # ==================================================================
+    # STEP 4 — Compose & target (the nested-box canvas)
+    # ==================================================================
+    def _wiz_compose(self):
+        from smi_acquire import wizard
+        st = self.wizard
+        col = pn.Column(pn.pane.HTML("<h2>🧩 Compose &amp; target</h2>"),
+                        sizing_mode="stretch_width")
+        warns = st.order_warnings()
+        warned_types = self._warned_types(warns)
+        if warns:
+            auto = pn.widgets.Button(name="↓ auto-order (slow outermost)",
+                                     button_type="primary", width=240)
+            auto.on_click(lambda _e: self._wiz_autoorder())
+            col.append(pn.Column(
+                pn.pane.Alert("⚠️ **Ordering warnings**\n\n"
+                              + "\n".join("- {}".format(w) for w in warns),
+                              alert_type="warning"), auto))
+
+        # The nested-box canvas.
+        if not st.axes:
+            col.append(pn.pane.Alert(
+                "No changes — a single 📸 measurement per sample.", alert_type="success"))
+        else:
+            col.append(self._wiz_canvas(warned_types))
+
+        # + add another change
+        present = {a.type for a in st.axes}
+        missing = [k for k in wizard.changeables() if k.type not in present]
+        if missing:
+            add_row = pn.Row(pn.pane.HTML("<b>+ add another change:</b>"),
+                             align="center")
+            for kind in missing:
+                sheet = (".bk-btn, button { border:1px solid %s !important; color:%s !important;"
+                         "background:#fff !important; border-radius:14px !important; }"
+                         % (kind.color, kind.color))
+                b = pn.widgets.Button(name="{} {}".format(kind.icon, kind.label), height=32,
+                                      stylesheets=[sheet], margin=(0, 4, 4, 0))
+                b.on_click(lambda _e, t=kind.type: self._wiz_toggle(t))
+                add_row.append(b)
+            col.append(add_row)
+
+        # Live readout
+        col.append(pn.pane.HTML(
+            "<div style='margin:8px 0;font-size:16px'><b>{:,} events per sample</b></div>".format(
+                st.events_per_sample())))
+
+        # Target
+        col.append(pn.layout.Divider())
+        col.append(self._wiz_target())
+        return col
+
+    def _wiz_canvas(self, warned_types):
+        """Render the axes as literally nested boxes; innermost holds the measure core."""
+        st = self.wizard
+        n = len(st.axes)
+        # Build from innermost out so each box wraps the previous content.
+        inner = self._wiz_measure_core()
+        for i in range(n - 1, -1, -1):
+            inner = self._wiz_axis_box(i, st.axes[i], inner,
+                                       warned=(st.axes[i].type in warned_types))
+        return inner
+
+    def _wiz_measure_core(self):
+        st = self.wizard
+        ndet = len(st.beam_spec().detectors)
+        return pn.pane.HTML(
+            "<div style='background:#37474F;color:#fff;padding:12px;border-radius:10px;"
+            "text-align:center;font-weight:600'>📸 Measure<br>"
+            "<span style='font-weight:400;font-size:12px'>{} detector(s) · {}s</span></div>"
+            .format(ndet, st.exposure_s), margin=(6, 0, 6, 0))
+
+    def _wiz_axis_box(self, i, ax, inner, *, warned=False):
+        st = self.wizard
+        kind = registry.AXIS_KIND_BY_TYPE.get(ax.type)
+        color = kind.color if kind else "#607D8B"
+        icon = kind.icon if kind else "●"
+        label = kind.label if kind else ax.type
+        # cumulative outer product: points of this axis × all outer axes (0..i)
+        moves = 1
+        for j in range(i + 1):
+            moves *= max(1, st.axes[j].n_points())
+
+        warn_html = ""
+        box_border = color
+        bg = _tint(color, "22")
+        if warned:
+            box_border = "#E65100"
+            bg = _tint("#FF7043", "33")
+            warn_html = ("<span style='color:#BF360C;font-weight:700'> ⚠️ slow-inside-fast</span>")
+
+        header = pn.pane.HTML(
+            "<div style='font-weight:600;color:#37474F'>{ic} {lab} "
+            "<span style='color:#666;font-weight:400'>× {n} pts</span> {badge}{warn}</div>"
+            .format(ic=icon, lab=label, n=ax.n_points(),
+                    badge=_pill("moves {}×".format(moves), color), warn=warn_html))
+
+        up = pn.widgets.Button(name="▲", width=34, height=30, disabled=(i == 0))
+        up.on_click(lambda _e, idx=i: self._wiz_move(idx, -1))
+        down = pn.widgets.Button(name="▼", width=34, height=30,
+                                 disabled=(i == len(st.axes) - 1))
+        down.on_click(lambda _e, idx=i: self._wiz_move(idx, +1))
+        edit = pn.widgets.Toggle(name="✎ edit", width=70, height=30,
+                                 value=self._wiz_edit_open.get(ax.type, False))
+        edit.param.watch(lambda e, t=ax.type: self._wiz_set_edit(t, e.new), "value")
+        rm = pn.widgets.Button(name="✕", button_type="danger", width=34, height=30)
+        rm.on_click(lambda _e, t=ax.type: self._wiz_remove(t))
+
+        box = pn.Column(
+            pn.Row(header, pn.layout.HSpacer(), up, down, edit, rm,
+                   sizing_mode="stretch_width", align="center"),
+            sizing_mode="stretch_width",
+            styles={"background": bg, "border-left": "5px solid " + box_border,
+                    "border-radius": "10px", "padding": "10px 12px",
+                    "margin": "6px 0"})
+        if self._wiz_edit_open.get(ax.type, False):
+            box.append(self._wiz_inline_params(i, ax))
+        box.append(inner)
+        return box
+
+    def _wiz_inline_params(self, i, ax):
+        fields = pn.Column(styles={"background": "#ffffffaa", "padding": "6px 8px",
+                                   "border-radius": "8px", "margin": "4px 0"})
+        if ax.type == "spatial":
+            sh = pn.widgets.RadioButtonGroup(options=["spot", "line", "grid"],
+                                             value=self._spatial_shape(ax))
+            sh.param.watch(lambda e, idx=i: self._wiz_set_shape(idx, e.new), "value")
+            fields.append(pn.Row(pn.pane.HTML("<b>Shape</b>"), sh))
+        for f in axis_param_schema(ax.type):
+            fields.append(self._param_widget(ax, f, None, self._render_wizard))
+        return fields
+
+    def _wiz_move(self, i, delta):
+        self.wizard.move_axis(i, delta)
+        self._render_wizard()
+
+    def _wiz_autoorder(self):
+        self.wizard.auto_order()
+        self._render_wizard()
+
+    def _wiz_remove(self, axis_type):
+        self.wizard.remove_change(axis_type)
+        self._wiz_edit_open.pop(axis_type, None)
+        self._render_wizard()
+
+    def _wiz_set_edit(self, axis_type, value):
+        self._wiz_edit_open[axis_type] = bool(value)
+        self._render_wizard()
+
+    @staticmethod
+    def _warned_types(warns):
+        """Axis types named (as label) in any order warning."""
+        out = set()
+        for kind in registry.AXIS_KINDS:
+            for w in warns:
+                if "'{}'".format(kind.type) in w or "'{}:".format(kind.type) in w:
+                    out.add(kind.type)
+        return out
+
+    def _wiz_target(self):
+        st = self.wizard
+        col = pn.Column(pn.pane.HTML("<b>🎯 Run on</b>"))
+        opts = self._target_options()         # {label: "all" | "holder:<id>"}
+        cur = "all"
+        if st.target_kind == "holder" and st.target_holder_id:
+            cur = "holder:" + st.target_holder_id
+        sel = pn.widgets.Select(options=opts, value=cur if cur in opts.values() else "all",
+                                width=320)
+        sel.param.watch(lambda e: self._wiz_set_target(e.new), "value")
+        col.append(sel)
+        # positioned readout
+        samples = self._wiz_target_samples()
+        npos = sum(1 for s in samples if self._is_positioned(s))
+        col.append(pn.pane.HTML(
+            "<span style='color:#2e7d32'>→ {} positioned sample(s) "
+            "({} total in target)</span>".format(npos, len(samples))))
+        return col
+
+    def _wiz_set_target(self, val):
+        st = self.wizard
+        if val and val.startswith("holder:"):
+            st.target_kind = "holder"
+            st.target_holder_id = val[len("holder:"):]
+        else:
+            st.target_kind = "all"
+            st.target_holder_id = None
+        self._render_wizard()
+
+    def _wiz_target_samples(self):
+        st = self.wizard
+        if st.target_kind == "holder" and st.target_holder_id:
+            return self.store.list_samples(holder_id=st.target_holder_id)
+        return self.store.list_samples()
+
+    # ==================================================================
+    # STEP 5 — Review & run
+    # ==================================================================
+    def _wiz_review(self):
+        st = self.wizard
+        # Apply the wizard onto a current Experiment (create one if needed).
+        if self.current_exp is None:
+            exp = st.to_experiment(name=st.suggested_scan_name() or "experiment 1")
+            self.project.experiments.append(exp)
+            self.current_exp = exp
+        else:
+            st.apply_to_experiment(self.current_exp)
+        self.refresh_spine()
+        self._render_script()
+
+        col = pn.Column(pn.pane.HTML("<h2>🚀 Review &amp; run</h2>"),
+                        sizing_mode="stretch_width")
+        col.append(pn.pane.HTML(
+            "<div style='font-size:15px;color:#37474F'>{}</div>".format(
+                self._wiz_human_summary())))
+
+        validate = pn.widgets.Button(name="Validate (dry-run)", button_type="primary",
+                                     width=180)
+        validate.on_click(lambda _e: self._validate())
+        copy_btn = pn.widgets.Button(name="⧉ Copy RE command", button_type="success",
+                                     width=200)
+        copy_btn.on_click(lambda _e: self._submit_copy())
+        submit_q = pn.widgets.Button(name="⇪ Submit to queue (qserver — N/A)",
+                                     width=260, disabled=True)
+        submit_q.on_click(lambda _e: self._submit_queue())
+        col.append(pn.Row(validate, copy_btn, submit_q))
+        col.append(self.submit_status)
+        col.append(self.report)
+        col.append(self.code)
+        return col
+
+    def _wiz_human_summary(self):
+        from smi_acquire import wizard
+        st = self.wizard
+        geo = wizard.GEOMETRY_BY_VALUE.get(st.geometry)
+        name = st.suggested_scan_name()
+        axes = " × ".join(a.type for a in st.axes) or "single point"
+        return "<b>{}</b> · {} · 1 run/sample · {:,} events".format(
+            name, axes, st.events_per_sample()) + (
+            "  ({})".format(geo.label) if geo else "")
+
+    # ==================================================================
+    # shared experiment/target helpers (reused by the wizard)
+    # ==================================================================
     def _exp_options(self):
         opts = {"(no experiment)": None}
         opts.update({e.name: e.id for e in self.project.experiments})
@@ -636,192 +1173,36 @@ class AcquireApp:
         return opts
 
     def _refresh_experiment_list(self):
-        self.exp_select.options = self._exp_options()
-        self.exp_select.value = self.current_exp.id if self.current_exp else None
-
-    def _on_pick_exp(self, _e):
-        eid = self.exp_select.value
-        self.current_exp = next((e for e in self.project.experiments if e.id == eid), None)
-        self._render_editor()
-
-    def _on_new_exp(self, _e):
-        e = Experiment(name="experiment {}".format(len(self.project.experiments) + 1))
-        self.project.experiments.append(e)
-        self.current_exp = e
-        self._refresh_experiment_list()
-        self._render_editor()
-        self.refresh_spine()
-
-    def _on_del_exp(self, _e):
-        if self.current_exp in self.project.experiments:
-            self.project.experiments.remove(self.current_exp)
-            self.current_exp = self.project.experiments[0] if self.project.experiments else None
-            self._refresh_experiment_list()
-            self._render_editor()
-            self.refresh_spine()
-
-    def _render_editor(self):
-        self.editor_box.clear()
-        e = self.current_exp
-        if e is None:
-            self.editor_box.append(pn.pane.Markdown(
-                "_No experiment selected. Create one, or seed it from the interview below._"))
-            self.editor_box.append(self._interview_card(target=None))
-            self.code.value = ""
+        """Re-sync the wizard with the current experiment (used after loading a project)."""
+        if not hasattr(self, "wizard"):
             return
-
-        name = pn.widgets.TextInput(name="Experiment name", value=e.name)
-        scan = pn.widgets.TextInput(name="Scan name (run label)", value=e.scan_name)
-        self.target_select = pn.widgets.Select(name="Target", options=self._target_options(),
-                                               value=self._target_value(e.target))
-        geo = pn.widgets.Select(name="Geometry", options=["transmission", "reflection"],
-                                value=e.apparatus.geometry)
-        exp_t = pn.widgets.FloatInput(name="Exposure (s)", value=e.beam.exposure_s, step=0.1)
-
-        def _apply(_ev):
-            e.name = name.value
-            e.scan_name = scan.value
-            e.target = self._parse_target(self.target_select.value)
-            e.apparatus.geometry = geo.value
-            e.beam.exposure_s = exp_t.value
-            self._refresh_experiment_list()
-            self._render_script()
-            self.refresh_spine()
-        for w in (name, scan, self.target_select, geo, exp_t):
-            w.param.watch(_apply, "value")
-
-        self.editor_box.extend([
-            pn.Row(name, scan),
-            pn.Row(self.target_select, geo, exp_t),
-            self._beam_card(e),
-            self._apparatus_card(e),
-            self._axes_card(e),
-            self._manual_card(e),
-            self._interview_card(target=e),
-        ])
-        self._render_script()
-
-    def _target_value(self, t: Target):
-        if t.kind == "holder" and t.holder_id:
-            return "holder:" + t.holder_id
-        return "all"
-
-    def _parse_target(self, val):
-        if val and val.startswith("holder:"):
-            return Target(kind="holder", holder_id=val[len("holder:"):])
-        return Target(kind="all")
-
-    # ---- concern cards (operate on the current Experiment) ------------
-    def _beam_card(self, e):
-        dets = pn.widgets.MultiChoice(name="Detectors", options=registry.detector_names(),
-                                      value=list(e.beam.detectors))
-        arc = pn.widgets.Checkbox(name="arc-aware (saxs_waxs_dets)", value=e.beam.arc_aware)
-        reads = pn.widgets.MultiChoice(name="Record per event", options=registry.read_names(),
-                                       value=list(e.beam.reads))
-
-        def _apply(_ev):
-            e.beam.detectors = list(dets.value)
-            e.beam.arc_aware = arc.value
-            e.beam.reads = list(reads.value)
-            self._render_script()
-        for w in (dets, arc, reads):
-            w.param.watch(_apply, "value")
-        return _card("Beam / q-range", dets, arc, reads)
-
-    def _apparatus_card(self, e):
-        ap = e.apparatus
-        heater = pn.widgets.Select(name="Heater", options={"(none)": None, **{
-            registry.HEATERS[k]: k for k in registry.HEATERS}}, value=ap.heater)
-        align = pn.widgets.Select(name="Alignment routine", options={"(none)": None, **{
-            r: r for r in registry.ALIGNMENT_ROUTINES}}, value=ap.align_routine)
-        angle = pn.widgets.FloatInput(name="Align angle", value=ap.align_angle, step=0.05)
-        atts = pn.widgets.MultiChoice(name="Attenuators in", options=registry.ATTENUATORS,
-                                      value=list(ap.attenuators_in))
-
-        def _apply(_ev):
-            ap.heater, ap.align_routine = heater.value, align.value
-            ap.align_angle, ap.attenuators_in = angle.value, list(atts.value)
-            self._render_script()
-        for w in (heater, align, angle, atts):
-            w.param.watch(_apply, "value")
-        return _card("Apparatus / geometry (→ setup)", pn.Row(heater, align), pn.Row(angle, atts))
-
-    def _axes_card(self, e):
-        status = pn.pane.Markdown("")
-        inner = pn.Column()
-
-        def _render_axes():
-            inner.clear()
-            if not e.axes:
-                inner.append(pn.pane.Markdown("_no axes — a single point per sample._"))
-            for i, ax in enumerate(e.axes):
-                inner.append(self._axis_row(e, i, ax, _render_axes, status))
-            _update_status()
-
-        def _update_status():
-            from smi_acquire.spec import ExperimentSpec
-            sp = ExperimentSpec(axes=e.axes)
-            warns = sp.order_warnings()
-            msg = "**Nesting:** {}  →  **{:,} events/sample**".format(
-                sp.summary(), sp.events_per_sample())
-            if warns:
-                msg += "\n\n" + "\n".join("⚠️ {}".format(w) for w in warns)
-            status.object = msg
-            self._render_script()
-
-        add = pn.widgets.Select(options={"+ add axis…": None, **{
-            k.label: k.type for k in registry.AXIS_KINDS}}, width=240)
-
-        def _on_add(ev):
-            if ev.new:
-                e.axes.append(default_axis(ev.new))
-                add.value = None
-                _render_axes()
-        add.param.watch(_on_add, "value")
-        sort_btn = pn.widgets.Button(name="↓ sort slow-outermost", width=180)
-        sort_btn.on_click(lambda _e: (setattr(e, "axes", reorder_axes_by_speed(e.axes)),
-                                      _render_axes()))
-        _render_axes()
-        return _card("Scan axes (outermost → innermost)", status, inner, pn.Row(add, sort_btn))
-
-    def _axis_row(self, e, i, ax, rerender, status):
-        kind = registry.AXIS_KIND_BY_TYPE.get(ax.type)
-        speed = {0: "fast", 1: "med", 2: "slow"}[ax.speed]
-        header = pn.pane.Markdown("**{}. {}** · _{}_ · {} pts".format(
-            i + 1, kind.label if kind else ax.type, speed, ax.n_points()))
-        up = pn.widgets.Button(name="▲", width=36)
-        down = pn.widgets.Button(name="▼", width=36)
-        rm = pn.widgets.Button(name="✕", button_type="danger", width=36)
-
-        def _move(d):
-            j = i + d
-            if 0 <= j < len(e.axes):
-                e.axes[i], e.axes[j] = e.axes[j], e.axes[i]
-                rerender()
-        up.on_click(lambda _e: _move(-1))
-        down.on_click(lambda _e: _move(+1))
-        rm.on_click(lambda _e: (e.axes.pop(i), rerender()))
-
-        fields = pn.Column()
-        for f in axis_param_schema(ax.type):
-            fields.append(self._param_widget(ax, f, status, rerender))
-        return pn.Column(
-            pn.Row(header, pn.layout.HSpacer(), up, down, rm), fields, pn.layout.Divider(),
-            styles={"background": "#f6f8fa", "padding": "6px 10px", "border-radius": "6px"},
-            margin=(0, 0, 6, 0))
+        from smi_acquire.wizard import WizardState
+        if self.current_exp is not None:
+            self.wizard = WizardState.from_experiment(self.current_exp)
+        else:
+            self.wizard = WizardState()
+        self._wiz_edit_open = {}
+        self._render_wizard()
 
     def _param_widget(self, ax, f, status, rerender):
+        """A single per-param widget bound to ``ax.params[f.key]``.
+
+        ``status`` is unused here (kept for the old Plan caller signature); ``rerender`` is
+        invoked after each edit (the wizard passes ``self._render_wizard``).
+        """
         cur = _get(ax.params, f.key)
         if cur is None:
             cur = f.default
+        help_txt = getattr(f, "help", "") or ""
         if f.kind == "float":
-            w = pn.widgets.FloatInput(name=f.label, value=float(cur or 0))
+            w = pn.widgets.FloatInput(name=f.label, value=float(cur or 0), step=0.1)
         elif f.kind == "int":
             w = pn.widgets.IntInput(name=f.label, value=int(cur or 0))
         elif f.kind == "bool":
             w = pn.widgets.Checkbox(name=f.label, value=bool(cur))
         elif f.kind == "floatlist":
-            w = pn.widgets.TextInput(name=f.label, value=_fmt_floatlist(cur))
+            w = pn.widgets.TextInput(name=f.label, value=_fmt_floatlist(cur),
+                                     placeholder="space/comma separated")
         else:
             w = pn.widgets.TextInput(name=f.label, value=str(cur if cur is not None else ""))
 
@@ -830,106 +1211,12 @@ class AcquireApp:
             _set(ax.params, f.key, v)
             rerender()
         w.param.watch(_apply, "value")
+        if help_txt:
+            return pn.Column(w, pn.pane.HTML(
+                "<span style='color:#888;font-size:11px'>{}</span>".format(help_txt)),
+                margin=(0, 0, 2, 0))
         return w
 
-    def _manual_card(self, e):
-        inner = pn.Column()
-
-        def _render():
-            inner.clear()
-            if not e.manual_setup:
-                inner.append(pn.pane.Markdown("_none_"))
-            for i, step in enumerate(e.manual_setup):
-                prompt = pn.widgets.TextInput(name="Prompt", value=step.prompt)
-                names = pn.widgets.TextInput(name="Capture signals (comma)",
-                                             value=", ".join(v["name"] for v in step.values))
-                rm = pn.widgets.Button(name="✕", button_type="danger", width=36)
-
-                def _apply(_ev, step=step, prompt=prompt, names=names):
-                    step.prompt = prompt.value
-                    step.values = [{"name": n.strip(), "cast": "float"}
-                                   for n in names.value.split(",") if n.strip()]
-                    self._render_script()
-                prompt.param.watch(_apply, "value")
-                names.param.watch(_apply, "value")
-                rm.on_click(lambda _e, idx=i: (e.manual_setup.pop(idx), _render()))
-                inner.append(pn.Row(prompt, names, rm))
-            self._render_script()
-
-        from smi_acquire.spec import ManualSetupStep
-        add = pn.widgets.Button(name="+ manual setup step", width=200)
-        add.on_click(lambda _e: (e.manual_setup.append(ManualSetupStep(
-            prompt="Confirm the next condition", values=[{"name": "value_1", "cast": "float"}])),
-            _render()))
-        _render()
-        return _card("Manual setup steps (→ recorded Signals)", inner, add)
-
-    # ---- the interview (non-reloading) -------------------------------
-    def _interview_card(self, target):
-        widgets = {}
-        rows = {}
-        container = pn.Column()
-
-        for q in interview.INTAKE:
-            w = self._intake_widget(q)
-            widgets[q.key] = w
-            row = pn.Column(pn.pane.Markdown("**{}**".format(q.prompt)), w)
-            if q.help:
-                row.insert(1, pn.pane.Markdown(
-                    "<span style='color:#777;font-size:12px'>{}</span>".format(q.help)))
-            rows[q.key] = row
-            container.append(row)
-
-        def _answers():
-            return {k: w.value for k, w in widgets.items()}
-
-        def _refresh_visibility(*_):
-            a = _answers()
-            for q in interview.INTAKE:
-                rows[q.key].visible = q.visible(a)
-
-        for w in widgets.values():
-            w.param.watch(_refresh_visibility, "value")
-        _refresh_visibility()
-
-        seed_btn = pn.widgets.Button(name="◆ seed experiment from answers",
-                                     button_type="primary", width=260)
-
-        def _seed(_e):
-            spec = interview.seed_spec_from_intake(_answers())
-            e = self.current_exp
-            if e is None:
-                e = Experiment.from_spec(spec, name="experiment {}".format(
-                    len(self.project.experiments) + 1))
-                self.project.experiments.append(e)
-                self.current_exp = e
-            else:
-                e.beam, e.apparatus = spec.beam, spec.apparatus
-                e.axes, e.manual_setup = spec.axes, spec.manual_setup
-                e.scan_name = spec.scan_name
-            self._refresh_experiment_list()
-            self._render_editor()
-            self.refresh_spine()
-            _toast("seeded '{}'".format(e.name))
-        seed_btn.on_click(_seed)
-
-        return pn.Card(container, seed_btn, title="Seed from a short interview (optional)",
-                       collapsed=(target is not None and bool(target.axes)))
-
-    def _intake_widget(self, q):
-        if q.kind == "text":
-            return pn.widgets.TextInput(value=q.default or "")
-        if q.kind == "bool":
-            return pn.widgets.Checkbox(value=bool(q.default), name="yes")
-        if q.kind == "choice":
-            opts = {label: val for val, label in q.options}
-            return pn.widgets.RadioBoxGroup(options=opts, value=q.default or list(opts.values())[0])
-        if q.kind == "multichoice":
-            opts = {label: val for val, label in q.options}
-            return pn.widgets.CheckBoxGroup(options=opts, value=list(q.default or []))
-        return pn.widgets.TextInput(value="")
-
-    # ---- script + dry-run --------------------------------------------
     def _render_script(self):
         e = self.current_exp
         if e is None:
@@ -997,9 +1284,10 @@ class AcquireApp:
     def _build(self):
         self._build_spine()
         self._build_home()
-        self._build_plan()
+        self._build_wizard()
 
-        self.tabs = pn.Tabs(("Align & Samples", self.home), ("Plan", self.plan), dynamic=False)
+        self.tabs = pn.Tabs(("Align & Samples", self.home), ("Plan", self.wizard_box),
+                            dynamic=False)
         self.tabs.param.watch(self._on_tab, "active")
 
         self.template = pn.template.FastListTemplate(
@@ -1015,17 +1303,12 @@ class AcquireApp:
         if event.new == 0:
             self._ensure_microscope()
         elif event.new == 1:
-            self._render_script()
+            self._render_wizard()
 
     def servable(self):
         # start the microscope eagerly so the home tab is live on load
         pn.state.onload(self._ensure_microscope)
         return self.template.servable(title="smi-acquire")
-
-
-def _card(title, *content):
-    return pn.Column(pn.pane.Markdown("### {}".format(title)), *content,
-                     pn.layout.Divider(), margin=(0, 0, 10, 0))
 
 
 AcquireApp().servable()
