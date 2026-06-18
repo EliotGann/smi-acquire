@@ -125,6 +125,39 @@ def test_to_experiment_and_target():
     assert [a.type for a in exp.axes] == ["temperature"]
 
 
+def test_project_name_flows_to_experiment_and_acquire_md():
+    """Regression: project_name must reach the acquire run's md (was dropped via Experiment)."""
+    from smi_acquire.spec import ExperimentSpec
+    from smi_acquire import codegen
+
+    st = WizardState(geometry="transmission", project_name="311234_Doe")
+    st.add_change("time")
+    exp = Experiment(name="e")
+    st.apply_to_experiment(exp)
+    assert exp.project_name == "311234_Doe"
+
+    # to_spec on the experiment carries it (even with an empty Project-name fallback)
+    spec = exp.to_spec([], project_name="")  # no samples -> placeholder row in codegen
+    assert isinstance(spec, ExperimentSpec)
+    assert spec.project_name == "311234_Doe"
+
+    src = codegen.render(spec)
+    call = [ln for ln in src.splitlines() if ln.startswith("RE(acquire")][0]
+    assert "md={'project_name': '311234_Doe'}" in call
+
+
+def test_experiment_project_name_json_roundtrip():
+    exp = Experiment(name="e", project_name="P1")
+    back = Experiment.from_dict(exp.to_dict())
+    assert back.project_name == "P1"
+
+
+def test_from_experiment_reads_project_name():
+    exp = Experiment(name="e", project_name="P2")
+    st = WizardState.from_experiment(exp)
+    assert st.project_name == "P2"
+
+
 def test_round_trip_from_experiment():
     st = WizardState(geometry="reflection", q="saxs", exposure_s=2.0)
     st.add_change("energy")

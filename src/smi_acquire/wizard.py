@@ -249,6 +249,7 @@ class WizardState:
         exp.apparatus = spec.apparatus
         exp.axes = list(spec.axes)
         exp.scan_name = spec.scan_name
+        exp.project_name = self.project_name
         exp.target = self.target()
 
     # ---- construction from an existing Experiment (edit mode) -------------
@@ -262,6 +263,7 @@ class WizardState:
             exposure_s=exp.beam.exposure_s,
             reads=list(exp.beam.reads),
             scan_name=exp.scan_name,
+            project_name=exp.project_name,
             align_routine=exp.apparatus.align_routine,
             align_angle=exp.apparatus.align_angle,
             heater=exp.apparatus.heater,

@@ -99,6 +99,7 @@ class Experiment:
     name: str
     id: str = field(default_factory=_new_id)
     scan_name: str = "acquire"
+    project_name: str = ""          # -> md={'project_name': ...} on the acquire run(s)
     beam: BeamSpec = field(default_factory=BeamSpec)
     apparatus: ApparatusSpec = field(default_factory=ApparatusSpec)
     axes: List[AxisSpec] = field(default_factory=list)
@@ -110,6 +111,7 @@ class Experiment:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "name": self.name, "id": self.id, "scan_name": self.scan_name,
+            "project_name": self.project_name,
             "beam": asdict(self.beam), "apparatus": asdict(self.apparatus),
             "axes": [asdict(a) for a in self.axes],
             "manual_setup": [asdict(m) for m in self.manual_setup],
@@ -123,6 +125,7 @@ class Experiment:
             name=d.get("name", "experiment"),
             id=d.get("id", _new_id()),
             scan_name=d.get("scan_name", "acquire"),
+            project_name=d.get("project_name", ""),
             beam=BeamSpec(**d.get("beam", {})) if d.get("beam") else BeamSpec(),
             apparatus=(ApparatusSpec(**d["apparatus"]) if d.get("apparatus")
                        else ApparatusSpec()),
@@ -138,11 +141,13 @@ class Experiment:
         """Build an :class:`ExperimentSpec` over a resolved subset of ``smi_plans.Sample``.
 
         ``samples`` are the (already target-resolved) redis samples; each becomes a
-        ``SampleList.from_columns`` row via :func:`smi_acquire.store.sample_to_row`.
+        ``SampleList.from_columns`` row via :func:`smi_acquire.store.sample_to_row`.  The
+        experiment's own ``project_name`` wins over the caller's (the Project name fallback).
         """
         rows = [sample_to_row(s) for s in samples]
         return ExperimentSpec(
-            project_name=project_name, scan_name=self.scan_name, md=dict(self.md),
+            project_name=self.project_name or project_name,
+            scan_name=self.scan_name, md=dict(self.md),
             beam=self.beam, apparatus=self.apparatus, axes=self.axes,
             manual_setup=self.manual_setup,
             samples=SamplesSpec(rows=rows, motor_object=motor_object),
@@ -153,7 +158,8 @@ class Experiment:
                   target: Optional[Target] = None) -> "Experiment":
         """Adopt a scan recipe authored as an ExperimentSpec (e.g. the interrogation seed)."""
         return cls(
-            name=name, scan_name=spec.scan_name, beam=spec.beam, apparatus=spec.apparatus,
+            name=name, scan_name=spec.scan_name, project_name=spec.project_name,
+            beam=spec.beam, apparatus=spec.apparatus,
             axes=list(spec.axes), manual_setup=list(spec.manual_setup),
             target=target or Target(), md=dict(spec.md),
         )
