@@ -196,15 +196,20 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
     builder = "acquire_bar" if multi else "acquire"
 
     # ---- decide what the body needs, so imports are exact -----------------
-    setup_lines: List[str] = []
+    # Alignment is a PRE-run hook (it opens its own runs + stages detectors): it MUST go to
+    # acquire(align=...) / acquire_bar(align_for=...), NOT into setup() (else RedundantStaging).
+    # setup() is the IN-run hook -- only recorded things (attenuators-in, manual_step).
+    align_lines: List[str] = []
     if ap.align_routine:
-        setup_lines.append("    yield from {}({})".format(ap.align_routine, _num(ap.align_angle)))
+        align_lines.append("    yield from {}({})".format(ap.align_routine, _num(ap.align_angle)))
+    setup_lines: List[str] = []
     for att in ap.attenuators_in:
         setup_lines.append("    yield from bps.mv({}.close_cmd, 1)".format(att))
     for step in spec.manual_setup:
         sigs = ", ".join(v["name"] for v in step.values)
         setup_lines.append("    yield from manual_step({!r}, signals=[{}])".format(
             step.prompt, sigs))
+    has_align = bool(align_lines)
     has_setup = bool(setup_lines)
     needs_manual_step = bool(spec.manual_setup)
     needs_bps = bool(ap.attenuators_in)
@@ -255,9 +260,16 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
             L.append("{0} = Signal(name={0!r}, value=0.0)".format(v["name"]))
     L.append("")
 
-    # ---- setup() ----------------------------------------------------------
+    # ---- align() (PRE-run hook) + setup() (IN-run hook) -------------------
+    if has_align:
+        L.append("def align(s):")
+        L.append("    # PRE-run: alignment opens its own runs + stages detectors, so it must be")
+        L.append("    # the `align` hook (NOT setup) -- else RedundantStaging in the measure run.")
+        L.extend(align_lines)
+        L.append("")
     if has_setup:
         L.append("def setup():")
+        L.append("    # IN-run: recorded in this run's documents/baseline.")
         L.extend(setup_lines)
         L.append("")
 
@@ -290,12 +302,16 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
     baseline = [v["name"] for step in spec.manual_setup for v in step.values]
 
     if multi:
+        if has_align:
+            call_kwargs.insert(0, "align_for=align")
         if has_setup:
             call_kwargs.insert(0, "setup_for=lambda s: setup()")
         if baseline:
             call_kwargs.append("baseline_for=lambda s: [{}]".format(", ".join(baseline)))
         call = "acquire_bar(bar, dets, axes_for, {})".format(", ".join(call_kwargs))
     else:
+        if has_align:
+            call_kwargs.insert(0, "align=lambda: align(bar[0])")
         if has_setup:
             call_kwargs.insert(0, "setup=setup")
         if baseline:
