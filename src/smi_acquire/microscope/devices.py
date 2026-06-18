@@ -155,6 +155,35 @@ class SampleStage(Device):
                 pass
         return readings
 
+    def chi_for_stack(self, stack: str) -> float:
+        """The in-plane (chi) rotation, in degrees, that rotates ``stack``'s x/y in the camera.
+
+        Per the SMI stack geometry (calibration reference is chi = 0):
+
+        * ``"piezo"`` → Huber ``stage.chi`` + piezo ``piezo.chi`` (both in-plane rotations sit
+          below the piezo x/y as seen by the camera, so they sum).
+        * ``"huber"`` → Huber ``stage.chi`` only (the Huber x/y sit below its own chi; the piezo
+          chi is above them and does not rotate them).
+
+        Missing axes contribute 0.  Any read error → 0 (so click-to-move degrades to the
+        un-rotated mapping rather than failing).
+        """
+        def _read(motor) -> float:
+            if motor is None:
+                return 0.0
+            try:
+                return float(motor.position)
+            except Exception:
+                return 0.0
+
+        huber = getattr(self, "huber", None)
+        piezo = getattr(self, "piezo", None)
+        stage_chi = _read(getattr(huber, "chi", None)) if huber is not None else 0.0
+        if stack == "huber":
+            return stage_chi
+        piezo_chi = _read(getattr(piezo, "chi", None)) if piezo is not None else 0.0
+        return stage_chi + piezo_chi
+
     def wait_for_connection(self, timeout: float = 5.0) -> None:
         for m in (self.x, self.y, self.z):
             m.wait_for_connection(timeout=timeout)

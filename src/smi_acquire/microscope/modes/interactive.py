@@ -414,15 +414,17 @@ class InteractiveMode:
     def _show_preview(self, x: float, y: float) -> None:
         self._pending = (x, y)
         beam_px = self.beam.center
-        dm = self._active_calibration().click_to_motor_delta((x, y), beam_px)
+        chi = self._chi_compensation()
+        dm = self._active_calibration().click_to_motor_delta((x, y), beam_px, chi_deg=chi)
         self._preview_cds.data = {"x": [x], "y": [y]}
         self._line_cds.data = {"x": [beam_px[0], x], "y": [beam_px[1], y]}
         self._preview_renderer.visible = True
         self._line_renderer.visible = True
         # Units differ by stack: piezo is µm, the Huber coarse stage is mm.
         u = "mm" if self._move_stack == "huber" else self.cfg.ui.motor_units
+        chi_note = f"  (χ={chi:+.2f}°)" if abs(chi) > 1e-6 else ""
         self._proposed.value = (
-            f"preview [{self._move_stack}] Δx={dm[0]:+.4f} {u}  Δy={dm[1]:+.4f} {u}  "
+            f"preview [{self._move_stack}] Δx={dm[0]:+.4f} {u}  Δy={dm[1]:+.4f} {u}{chi_note}  "
             f"→ click again to commit"
         )
 
@@ -466,7 +468,8 @@ class InteractiveMode:
 
     def _commit(self, x: float, y: float) -> None:
         beam_px = self.beam.center
-        dm = self._active_calibration().click_to_motor_delta((x, y), beam_px)
+        chi = self._chi_compensation()
+        dm = self._active_calibration().click_to_motor_delta((x, y), beam_px, chi_deg=chi)
         mx, my = self._active_motors()
         try:
             target_x = float(mx.position) + float(dm[0])
@@ -480,6 +483,13 @@ class InteractiveMode:
         except Exception as exc:  # noqa: BLE001
             self._proposed.value = f"move failed: {exc}"
         self._clear_preview()
+
+    def _chi_compensation(self) -> float:
+        """Current in-plane chi (deg) to rotate the active stack's click mapping by (0 if N/A)."""
+        try:
+            return self.stage.chi_for_stack(self._move_stack)
+        except Exception:
+            return 0.0
 
     def _clear_preview(self) -> None:
         self._pending = None

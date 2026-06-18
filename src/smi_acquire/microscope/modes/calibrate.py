@@ -88,17 +88,21 @@ class CalibrateMode:
         cfg: AppConfig,
         image_size_hint_provider,
         camera_stream: CameraStream,
+        huber_calibration: "CalibrationModel | None" = None,
     ) -> None:
         self.fig = fig
         self.stage = stage
         self.beam = beam_overlay
-        self.calibration = calibration
+        self.calibration = calibration              # piezo affine
+        self.huber_calibration = huber_calibration  # Huber affine (optional)
         self.cfg = cfg
         self._dims = image_size_hint_provider
         self._stream = camera_stream
         self._active = False
         self._proposed: np.ndarray | None = None
         self._running = False
+        # Which stack this calibration fits: "piezo" (default) or "huber".
+        self._cal_stack = "piezo"
 
         units = cfg.ui.motor_units
         is_um = units.lower() in ("um", "µm", "micron", "microns")
@@ -132,19 +136,30 @@ class CalibrateMode:
         self._proposed_matrix_view = pn.pane.Markdown("**proposed:** _run a calibration to populate_")
         self._residual_view = pn.pane.Markdown("")
 
+        # Which stack to calibrate (piezo default; Huber only if the stage exposes it).
+        self._stack_select = pn.widgets.RadioButtonGroup(
+            name="Calibrate stack", options=["piezo", "Huber"], value="piezo",
+            button_type="default", width=180)
+        self._stack_select.param.watch(self._on_cal_stack_change, "value")
+        _has_huber = (getattr(self.stage, "huber", None) is not None
+                      and self.huber_calibration is not None)
+        self._stack_row = pn.Row(pn.pane.Markdown("**fit:**", width=44), self._stack_select,
+                                 visible=_has_huber)
+
         self.panel = pn.Column(
             pn.pane.Markdown("### Calibrate"),
             pn.pane.Markdown(
                 "Automated pixel ↔ motor calibration. The routine captures a reference "
-                "image, then moves the stage ±step in x and ±step in y, and uses image "
-                "registration to fit the affine matrix."
+                "image, then moves the selected stack ±step in x and ±step in y, and uses "
+                "image registration to fit the affine matrix."
             ),
             pn.pane.Markdown(
-                "<span style='color:#888;font-size:12px'>Fits the <b>piezo</b> (primary x/y) "
-                "calibration. A separate <b>Huber</b> calibration + the piezo's rotation "
-                "coupling (it rides on the Huber θ/χ/φ) are the next alignment step "
-                "(per-stack Calibrate + rotation-aware click).</span>"
+                "<span style='color:#888;font-size:12px'>Fit the <b>piezo</b> (µm) and the "
+                "<b>Huber</b> (mm) stacks separately. Calibrate each at <b>χ = 0</b> — "
+                "click-to-move then rotation-corrects for the live χ (the piezo rides on the "
+                "Huber, so its x/y rotate with χ).</span>"
             ),
+            self._stack_row,
             pn.Row(self._step_mm, self._settle_s),
             self._status,
             self._progress,
@@ -183,6 +198,31 @@ class CalibrateMode:
             f"```\n[[{A[0,0]:+8.3f}, {A[0,1]:+8.3f}],\n"
             f" [{A[1,0]:+8.3f}, {A[1,1]:+8.3f}]]\n```"
         )
+
+    def _on_cal_stack_change(self, event) -> None:
+        self._cal_stack = "huber" if str(event.new).lower() == "huber" else "piezo"
+        # Reflect the selected stack's current matrix + drop any stale proposal.
+        self._proposed = None
+        self._proposed_matrix_view.object = "**proposed:** _run a calibration to populate_"
+        self._residual_view.object = ""
+        self._accept_btn.disabled = True
+        self._reject_btn.disabled = True
+        self._current_matrix_view.object = self._fmt_matrix(
+            "current", self._active_calibration().matrix)
+        self._status.value = "calibrating the {} stack (fit at χ = 0).".format(self._cal_stack)
+
+    def _active_motors(self):
+        """The (x, y) motors of the stack being calibrated (piezo primary, or Huber)."""
+        if self._cal_stack == "huber":
+            huber = getattr(self.stage, "huber", None)
+            if huber is not None and hasattr(huber, "x") and hasattr(huber, "y"):
+                return huber.x, huber.y
+        return self.stage.x, self.stage.y
+
+    def _active_calibration(self) -> CalibrationModel:
+        if self._cal_stack == "huber" and self.huber_calibration is not None:
+            return self.huber_calibration
+        return self.calibration
 
     def _on_start(self, _event) -> None:
         # Panel async-button: schedule the coroutine on the doc's event loop.
@@ -228,8 +268,9 @@ class CalibrateMode:
             _doc_safe(lambda: setattr(self._status, "value", "no image available — is the camera connected?"))
             return
 
+        cal_x, cal_y = self._active_motors()
         try:
-            m_ref = (float(self.stage.x.position), float(self.stage.y.position))
+            m_ref = (float(cal_x.position), float(cal_y.position))
         except Exception:
             _doc_safe(lambda: setattr(self._status, "value", "could not read motor positions"))
             return
@@ -243,8 +284,8 @@ class CalibrateMode:
             ty = m_ref[1] + dy
             status_msg = f"step {i + 1}/4: moving to (Δx={dx:+.3f}, Δy={dy:+.3f}) {units}…"
             _doc_safe(lambda v=status_msg: setattr(self._status, "value", v))
-            ok_x = await _wait_for_status(self.stage.x.set(tx))
-            ok_y = await _wait_for_status(self.stage.y.set(ty))
+            ok_x = await _wait_for_status(cal_x.set(tx))
+            ok_y = await _wait_for_status(cal_y.set(ty))
             if not (ok_x and ok_y):
                 fail_msg = f"step {i + 1}/4: motor move timed out, skipping"
                 idx = i + 1
@@ -272,8 +313,8 @@ class CalibrateMode:
             _doc_safe(lambda n=done_idx: setattr(self._progress, "value", n))
 
         _doc_safe(lambda: setattr(self._status, "value", "returning to reference position…"))
-        await _wait_for_status(self.stage.x.set(m_ref[0]))
-        await _wait_for_status(self.stage.y.set(m_ref[1]))
+        await _wait_for_status(cal_x.set(m_ref[0]))
+        await _wait_for_status(cal_y.set(m_ref[1]))
 
         if len(dm_list) < 2:
             _doc_safe(lambda: setattr(self._status, "value", "not enough successful steps to fit an affine"))
@@ -306,16 +347,20 @@ class CalibrateMode:
     def _on_accept(self, _event) -> None:
         if self._proposed is None:
             return
-        self.calibration.update_matrix(self._proposed)
-        # Persist to config.
-        self.cfg.calibration.matrix = self._proposed.tolist()
+        # Apply + persist to the matrix of the stack that was calibrated.
+        self._active_calibration().update_matrix(self._proposed)
+        if self._cal_stack == "huber":
+            self.cfg.calibration.huber_matrix = self._proposed.tolist()
+        else:
+            self.cfg.calibration.matrix = self._proposed.tolist()
         try:
             self.cfg.save()
         except Exception as exc:  # noqa: BLE001
             self._status.value = f"applied in-memory but save failed: {exc}"
         else:
-            self._status.value = "accepted and saved."
-        self._current_matrix_view.object = self._fmt_matrix("current", self.calibration.matrix)
+            self._status.value = f"accepted and saved ({self._cal_stack})."
+        self._current_matrix_view.object = self._fmt_matrix(
+            "current", self._active_calibration().matrix)
         self._accept_btn.disabled = True
         self._reject_btn.disabled = True
         self._proposed = None

@@ -202,7 +202,8 @@ def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=N
     linear = LinearScanMode(fig, stage, beam_overlay, calibration, cfg, dims, bookmark_store=interactive)
     focus = FocusMode(fig, stage, beam_overlay, calibration, cfg, dims, camera_stream=stream,
                       interlock=interlock)
-    calibrate = CalibrateMode(fig, stage, beam_overlay, calibration, cfg, dims, camera_stream=stream)
+    calibrate = CalibrateMode(fig, stage, beam_overlay, calibration, cfg, dims,
+                              camera_stream=stream, huber_calibration=huber_calibration)
     modes = (interactive, polygon, square, linear, focus, calibrate)
 
     script_panel = ScriptPanel([interactive, square, polygon, linear])
