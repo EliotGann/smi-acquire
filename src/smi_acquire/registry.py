@@ -87,29 +87,38 @@ class AxisKind:
     speed: int
     blurb: str                      # one-line description shown in the interview
     needs: List[str] = field(default_factory=list)   # apparatus/context prerequisites
+    icon: str = "●"                 # glyph for the iconic card (unicode; no image assets)
+    color: str = "#607D8B"          # accent color for the card + its nested box
 
 
 AXIS_KINDS: List[AxisKind] = [
     AxisKind("energy",      "Energy sweep (NEXAFS / edge)", SPEED_MEDIUM,
-             "Scan DCM energy across an absorption edge; optional beam re-seek on flux drop."),
+             "Scan DCM energy across an absorption edge; optional beam re-seek on flux drop.",
+             icon="🌈", color="#7E57C2"),
     AxisKind("temperature", "Temperature ramp",            SPEED_SLOW,
              "Step a heater through setpoints, equilibrating at each (slow → outermost).",
-             needs=["heater"]),
+             needs=["heater"], icon="🌡️", color="#EF5350"),
     AxisKind("incidence",   "Grazing incidence angle",     SPEED_MEDIUM,
              "Visit th0 + each incident angle (grazing geometry).",
-             needs=["reflection"]),
+             needs=["reflection"], icon="📐", color="#26A69A"),
     AxisKind("motor",       "Generic motor (arc / stage.φ / …)", SPEED_FAST,
-             "Step any single motor through a list of positions."),
+             "Step any single motor through a list of positions.",
+             icon="⚙️", color="#78909C"),
     AxisKind("spatial",     "Spatial sampling (spot / line / grid)", SPEED_FAST,
-             "Fresh x/y locations — a single spot, a line, or a raster grid (innermost)."),
+             "Fresh x/y locations — a single spot, a line, or a raster grid (innermost).",
+             icon="🎯", color="#42A5F5"),
     AxisKind("potential",   "Applied potential (e-chem)",  SPEED_MEDIUM,
-             "Step a potentiostat through voltages, equilibrating at each."),
+             "Step a potentiostat through voltages, equilibrating at each.",
+             icon="🔋", color="#FFA726"),
     AxisKind("rh",          "Relative humidity (SVA)",     SPEED_SLOW,
-             "Step relative-humidity setpoints (slow equilibration → outer)."),
+             "Step relative-humidity setpoints (slow equilibration → outer).",
+             icon="💧", color="#29B6F6"),
     AxisKind("time",        "Time series (kinetics)",      SPEED_FAST,
-             "Repeat N frames at a fixed period (innermost)."),
+             "Repeat N frames at a fixed period (innermost).",
+             icon="⏱️", color="#66BB6A"),
     AxisKind("manual",      "Manual / user-driven step",   SPEED_SLOW,
-             "Prompt the operator at each point (hand-set condition, sample swap)."),
+             "Prompt the operator at each point (hand-set condition, sample swap).",
+             icon="✋", color="#8D6E63"),
 ]
 
 AXIS_KIND_BY_TYPE: Dict[str, AxisKind] = {k.type: k for k in AXIS_KINDS}
