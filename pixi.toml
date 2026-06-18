@@ -64,10 +64,12 @@ env = { BEAM_IMAGE_CONFIG = "config/microscope.yaml", EPICS_CA_AUTO_ADDR_LIST = 
 cmd = "python -m smi_acquire.sim.fake_ioc"
 env = { EPICS_CA_AUTO_ADDR_LIST = "no", EPICS_CA_ADDR_LIST = "127.0.0.1", EPICS_CAS_AUTO_BEACON_ADDR_LIST = "no", EPICS_CAS_BEACON_ADDR_LIST = "127.0.0.1", EPICS_CAS_INTF_ADDR_LIST = "127.0.0.1" }
 
-# Real-PV variant (for later): inherits your shell's EPICS_CA_* and loads config/microscope.local.yaml
-# if present. Point that file at your real camera/motor PVs.
+# Real-PV variant: connects to the LIVE beamline. Inherits your shell's EPICS_CA_* (so CA/PVA
+# find the real IOCs — do NOT pin EPICS_CA_ADDR_LIST here) and loads config/microscope.local.yaml
+# (the gitignored real-PV override: XF:12IDC camera over PVA + the SmarAct piezo motors).
 [tasks.app-real]
 cmd = "panel serve apps/acquire_app.py --show --autoreload --port 5098"
+env = { BEAM_IMAGE_CONFIG = "config/microscope.local.yaml" }
 
 [tasks.test]
 cmd = "python -m pytest tests/ -q"

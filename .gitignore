@@ -6,3 +6,5 @@ __pycache__/
 build/
 dist/
 *.ipynb_checkpoints/
+# Real-hardware PV override (the live config; never commit beamline PVs)
+config/microscope.local.yaml
