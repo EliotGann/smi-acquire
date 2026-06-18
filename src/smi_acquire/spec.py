@@ -96,10 +96,21 @@ class AxisSpec:
         return max(1, len(self.values()))
 
     def values(self) -> List[Any]:
-        """The concrete list of visited values (expands an energy ``grid``)."""
+        """The concrete list of visited values.
+
+        Expands an energy ``grid`` (segments) and a ``range: [start, stop, step]`` shorthand
+        (inclusive of ``stop`` within float tolerance) used by value-list axes like ``incidence``
+        — so the user can give a start/stop/step instead of listing every point. An explicit
+        ``values`` list always wins if present.
+        """
         p = self.params
-        if self.type == "energy" and "grid" in p and not p.get("values"):
+        if p.get("values"):
+            return list(p.get("values") or [])
+        if self.type == "energy" and "grid" in p:
             return energy_grid_values(p["grid"])
+        rng = p.get("range")
+        if rng and len(rng) == 3:
+            return _arange(float(rng[0]), float(rng[1]), float(rng[2]))
         return list(p.get("values", []) or [])
 
 

@@ -890,8 +890,12 @@ class AcquireApp:
                 name="Shape", options=["spot", "line", "grid"], value=shape)
             sh.param.watch(lambda e, idx=i: self._wiz_set_shape(idx, e.new), "value")
             fields.append(pn.Row(pn.pane.HTML("<b>Shape</b>"), sh))
-        for f in axis_param_schema(ax.type):
-            fields.append(self._param_widget(ax, f, None, self._render_wizard))
+        # incidence: a list-vs-range(start/stop/step) chooser instead of only an explicit list
+        if ax.type == "incidence":
+            fields.append(self._incidence_fields(i, ax))
+        else:
+            for f in axis_param_schema(ax.type):
+                fields.append(self._param_widget(ax, f, None, self._render_wizard))
         return pn.Column(
             header,
             pn.Column(fields, styles={"background": _tint(color, "14"),
@@ -916,6 +920,78 @@ class AcquireApp:
         if 0 <= i < len(st.axes) and st.axes[i].type == "spatial":
             new = default_axis("spatial", shape=shape)
             st.axes[i].params = new.params
+        self._render_wizard()
+
+    # ---- incidence: list vs range (start/stop/step) -------------------
+    @staticmethod
+    def _incidence_mode(ax):
+        """'range' if the axis carries a [start,stop,step] range, else 'list'."""
+        rng = ax.params.get("range")
+        return "range" if (rng and len(rng) == 3) else "list"
+
+    def _incidence_fields(self, i, ax):
+        """A list-or-range chooser for grazing incidence angles."""
+        mode = self._incidence_mode(ax)
+        sel = pn.widgets.RadioButtonGroup(
+            name="Angles", options=["list", "range"], value=mode, width=160)
+        sel.param.watch(lambda e, idx=i: self._incidence_set_mode(idx, e.new), "value")
+        body = pn.Column()
+        if mode == "range":
+            rng = list(ax.params.get("range") or [0.1, 0.4, 0.05])
+            start = pn.widgets.FloatInput(name="start (deg)", value=float(rng[0]), step=0.01, width=120)
+            stop = pn.widgets.FloatInput(name="stop (deg)", value=float(rng[1]), step=0.01, width=120)
+            step = pn.widgets.FloatInput(name="step (deg)", value=float(rng[2]), step=0.01, width=120)
+
+            def _apply(_e, idx=i, s=start, e2=stop, st=step):
+                self._incidence_set_range(idx, s.value, e2.value, st.value)
+            for w in (start, stop, step):
+                w.param.watch(_apply, "value")
+            n = len(ax.values())
+            body.append(pn.Row(start, stop, step))
+            body.append(pn.pane.HTML(
+                "<span style='color:#555;font-size:12px'>→ {} angle(s): {}</span>".format(
+                    n, ", ".join("{:g}".format(v) for v in ax.values()))))
+        else:
+            vals = pn.widgets.TextInput(
+                name="Incident angles (deg, rel. to aligned 0)",
+                value=_fmt_floatlist(ax.params.get("values") or []))
+            vals.param.watch(lambda e, idx=i: self._incidence_set_list(idx, e.new), "value")
+            body.append(vals)
+        return pn.Column(pn.Row(pn.pane.HTML("<b>Incident angles</b>"), sel), body)
+
+    def _incidence_set_mode(self, i, mode):
+        st = self.wizard
+        if not (0 <= i < len(st.axes)):
+            return
+        ax = st.axes[i]
+        if mode == "range":
+            # seed a range from the current values (or a sensible default) and drop the list
+            cur = ax.values()
+            if len(cur) >= 2:
+                start, stop = cur[0], cur[-1]
+                step = round((stop - start) / (len(cur) - 1), 4) or 0.05
+            else:
+                start, stop, step = 0.1, 0.4, 0.05
+            ax.params["range"] = [start, stop, step]
+            ax.params.pop("values", None)
+        else:
+            # materialize the current points as an explicit list and drop the range
+            ax.params["values"] = ax.values()
+            ax.params.pop("range", None)
+        self._render_wizard()
+
+    def _incidence_set_range(self, i, start, stop, step):
+        st = self.wizard
+        if 0 <= i < len(st.axes):
+            st.axes[i].params["range"] = [float(start), float(stop), float(step)]
+            st.axes[i].params.pop("values", None)
+        self._render_wizard()
+
+    def _incidence_set_list(self, i, text):
+        st = self.wizard
+        if 0 <= i < len(st.axes):
+            st.axes[i].params["values"] = _parse_floatlist(text)
+            st.axes[i].params.pop("range", None)
         self._render_wizard()
 
     # ==================================================================
@@ -1046,8 +1122,11 @@ class AcquireApp:
                                              value=self._spatial_shape(ax))
             sh.param.watch(lambda e, idx=i: self._wiz_set_shape(idx, e.new), "value")
             fields.append(pn.Row(pn.pane.HTML("<b>Shape</b>"), sh))
-        for f in axis_param_schema(ax.type):
-            fields.append(self._param_widget(ax, f, None, self._render_wizard))
+        if ax.type == "incidence":
+            fields.append(self._incidence_fields(i, ax))
+        else:
+            for f in axis_param_schema(ax.type):
+                fields.append(self._param_widget(ax, f, None, self._render_wizard))
         return fields
 
     def _wiz_move(self, i, delta):

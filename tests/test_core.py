@@ -36,6 +36,24 @@ def test_energy_grid_expansion_is_exact():
     assert len(vals) == 17 + 12 - 1
 
 
+def test_incidence_range_expands_inclusive():
+    ax = AxisSpec(type="incidence", params={"range": [0.1, 0.4, 0.05]})
+    assert ax.values() == [0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4]
+    assert ax.n_points() == 7
+
+
+def test_explicit_values_beat_range():
+    ax = AxisSpec(type="incidence", params={"values": [0.1, 0.2], "range": [0.1, 0.4, 0.05]})
+    assert ax.values() == [0.1, 0.2]
+
+
+def test_range_works_for_any_value_axis():
+    # the range shorthand is generic (motor/potential/etc.), not incidence-only
+    ax = AxisSpec(type="motor", params={"name": "arc", "device": "waxs",
+                                        "range": [0, 20, 5]})
+    assert ax.values() == [0, 5, 10, 15, 20]
+
+
 def test_event_estimate_multiplies_axes():
     sp = ExperimentSpec(axes=[
         AxisSpec("temperature", {"values": [30, 60, 90]}),
