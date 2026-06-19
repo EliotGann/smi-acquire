@@ -228,7 +228,8 @@ class AcquireApp:
     # ==================================================================
     def _build_spine(self):
         self.spine = pn.widgets.Tabulator(
-            value=self._spine_df(), show_index=False, selectable=1, height=320, theme="simple",
+            value=self._spine_df(), show_index=False, selectable="checkbox", height=320,
+            theme="simple",
             widths={"name": 110, "holder": 90, "x": 60, "y": 60, "z": 52, "incidence": 80,
                     "active": 50, "md": 120},
             editors={"name": {"type": "input"}, "holder": {"type": "input"},
@@ -343,11 +344,22 @@ class AcquireApp:
         return {"(pick holder)": None,
                 **{h.name: h.id for h in self.store.list_holders()}}
 
+    def _selected_indices(self):
+        """The selected spine rows (sorted), clamped to valid sample ids."""
+        sel = sorted(int(i) for i in (self.spine.selection or []) if 0 <= int(i) < len(self._spine_ids))
+        return sel
+
+    def _selected_samples(self):
+        """All selected samples (multi-select via checkbox + ctrl/shift)."""
+        return [self.store.sample_by_id(self._spine_ids[i]) for i in self._selected_indices()
+                if self.store.sample_by_id(self._spine_ids[i]) is not None]
+
     def _selected_sample(self):
-        sel = list(self.spine.selection or [])
-        if not sel or sel[0] >= len(self._spine_ids):
+        """The single (first) selected sample -- for the detail panel / single-target actions."""
+        idx = self._selected_indices()
+        if not idx:
             return None
-        return self.store.sample_by_id(self._spine_ids[sel[0]])
+        return self.store.sample_by_id(self._spine_ids[idx[0]])
 
     # Position-field display: label + units (piezo µm, Huber mm/deg).
     _POS_FIELDS = [
@@ -377,10 +389,16 @@ class AcquireApp:
         """Surface the full captured position (all axes) of the selected sample."""
         if not hasattr(self, "sample_detail"):
             return
-        s = self._selected_sample()
-        if s is None:
+        sel = self._selected_samples()
+        if not sel:
             self.sample_detail.object = "_select a sample to see its full position_"
             return
+        if len(sel) > 1:
+            self.sample_detail.object = (
+                "**{} samples selected** — remove / move to holder act on all; "
+                "load uses the first.".format(len(sel)))
+            return
+        s = sel[0]
         lines = [f"**{s.name}** — full captured position",
                  "nominal: " + self._fmt_position(s.nominal)]
         if s.refined is not None:
@@ -422,11 +440,15 @@ class AcquireApp:
         self.refresh_spine()
 
     def _on_remove_selected(self, _e):
-        s = self._selected_sample()
-        if s is not None:
+        samples = self._selected_samples()
+        if not samples:
+            _toast("select one or more samples (checkboxes / ctrl+click)", "warning")
+            return
+        for s in samples:
             self.store.delete_sample(s.id)
-            self.spine.selection = []
-            self.refresh_spine()
+        self.spine.selection = []
+        self.refresh_spine()
+        _toast("removed {} sample(s)".format(len(samples)))
 
     def _on_set_active(self, _e):
         s = self._selected_sample()
@@ -452,11 +474,15 @@ class AcquireApp:
             self.refresh_spine()
 
     def _on_move_holder(self, _e):
-        s = self._selected_sample()
+        samples = self._selected_samples()
         hid = self.move_holder.value
-        if s is not None and hid:
+        if not samples or not hid:
+            _toast("select sample(s) and a holder", "warning")
+            return
+        for s in samples:
             self.store.set_sample_holder(s.id, hid)
-            self.refresh_spine()
+        self.refresh_spine()
+        _toast("moved {} sample(s)".format(len(samples)))
 
     def _on_import_csv(self, _e):
         if not self.spine.disabled and getattr(_e, "new", None):
