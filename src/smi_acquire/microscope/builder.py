@@ -40,10 +40,10 @@ from .modes.linear import LinearScanMode
 from .modes.square import SquareScanMode
 from .overlays import BeamOverlay
 from .widgets.beam_panel import BeamPanel
+from .widgets.exposure import ExposureControl
 from .widgets.motor_panel import MotorPanel
 from .widgets.script_panel import ScriptPanel
 from .widgets.status_bar import StatusBar
-
 log = logging.getLogger(__name__)
 
 
@@ -137,7 +137,7 @@ class MicroscopeUI:
 def _build_figure(cfg: AppConfig):
     w, h = cfg.ui.image_size_hint
     fig = figure(
-        title="On-axis microscope (fake IOC)",
+        title="On-axis microscope",
         x_range=(0, w), y_range=(h, 0),
         width=760, height=int(760 * h / w),
         tools="pan,wheel_zoom,reset,tap", active_scroll="wheel_zoom",
@@ -193,8 +193,10 @@ def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=N
     motor_panel = MotorPanel(stage, cfg, executor=executor)
     beam_panel = BeamPanel(cfg, beam_overlay)
     status_bar = StatusBar(camera, stage)
+    exposure = ExposureControl(camera, interlock=interlock)
 
-    dims = lambda: (stream.current_dims().width, stream.current_dims().height)
+    def dims():
+        return (stream.current_dims().width, stream.current_dims().height)
     interactive = InteractiveMode(fig, stage, beam_overlay, calibration, cfg, dims,
                                   executor=executor, huber_calibration=huber_calibration)
     polygon = AreaMode(fig, stage, beam_overlay, calibration, cfg, dims, bookmark_store=interactive)
@@ -299,6 +301,7 @@ def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=N
         (stream.tick, interval_ms),
         (motor_panel.refresh_readbacks, 500),
         (status_bar.refresh, 1000),
+        (exposure.refresh, 1000),
         (_tick_all, interval_ms),
         (lambda: state["active"].tick_table(), 1000),
         (script_panel.refresh, 1500),
@@ -309,6 +312,7 @@ def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=N
     layout = pn.Column(
         pn.pane.Bokeh(_js_trigger, height=0, width=0, margin=0),
         pn.pane.Bokeh(_poly_tool_trigger, height=0, width=0, margin=0),
+        exposure.view,
         pn.Row(pn.pane.Bokeh(fig, sizing_mode="stretch_width"), side),
         pn.layout.Divider(),
         script_panel.view,

@@ -99,6 +99,17 @@ def _tint(color, alpha="22"):
     return c
 
 
+# A small palette to color successive energy regions distinctly (cycled).
+_REGION_COLORS = ["#7E57C2", "#42A5F5", "#26A69A", "#FFA726", "#EF5350", "#66BB6A", "#8D6E63"]
+
+
+def _region_color(base, r):
+    """A distinct color for energy region ``r`` (cycles a small palette; base is region 0)."""
+    if r == 0:
+        return base or _REGION_COLORS[0]
+    return _REGION_COLORS[r % len(_REGION_COLORS)]
+
+
 def _pill(text, bg, fg="#fff"):
     return ("<span style='display:inline-block;padding:1px 8px;border-radius:10px;"
             "background:{};color:{};font-size:11px;font-weight:600;"
@@ -893,6 +904,12 @@ class AcquireApp:
         # incidence: a list-vs-range(start/stop/step) chooser instead of only an explicit list
         if ax.type == "incidence":
             fields.append(self._incidence_fields(i, ax))
+        elif ax.type == "energy":
+            # the energy grid gets the visual boundaries+density editor; settle/flux_reseek
+            # remain simple form fields below it
+            fields.append(self._energy_fields(i, ax))
+            for f in axis_param_schema(ax.type):
+                fields.append(self._param_widget(ax, f, None, self._render_wizard))
         else:
             for f in axis_param_schema(ax.type):
                 fields.append(self._param_widget(ax, f, None, self._render_wizard))
@@ -992,6 +1009,163 @@ class AcquireApp:
         if 0 <= i < len(st.axes):
             st.axes[i].params["values"] = _parse_floatlist(text)
             st.axes[i].params.pop("range", None)
+        self._render_wizard()
+
+    # ---- energy: visual boundaries+density editor --------------------
+    @staticmethod
+    def _energy_grid(ax):
+        """The {'boundaries':[...], 'steps':[...]} grid (seeded if absent)."""
+        g = ax.params.get("grid")
+        if not isinstance(g, dict) or "boundaries" not in g:
+            g = {"boundaries": [2470.0, 2472.0, 2476.0, 2530.0], "steps": [1.0, 0.25, 5.0]}
+            ax.params["grid"] = g
+        # keep steps length = len(boundaries)-1
+        b, s = g["boundaries"], g.get("steps", [])
+        while len(s) < max(0, len(b) - 1):
+            s.append(1.0)
+        g["steps"] = s[:max(0, len(b) - 1)]
+        return g
+
+    def _energy_fields(self, i, ax):
+        from smi_acquire.spec import energy_grid_values
+        g = self._energy_grid(ax)
+        bounds = [float(x) for x in g["boundaries"]]
+        steps = [float(x) for x in g["steps"]]
+        pts = energy_grid_values(g)
+
+        rows = pn.Column()
+        # one row per REGION: [start] -> [stop]  step [s]   (boundaries shared between regions)
+        for r in range(len(bounds) - 1):
+            b_lo = pn.widgets.FloatInput(value=bounds[r], width=92, name=("from (eV)" if r == 0 else ""))
+            b_hi = pn.widgets.FloatInput(value=bounds[r + 1], width=92, name=("to (eV)" if r == 0 else ""))
+            step = pn.widgets.FloatInput(value=steps[r], width=78, step=0.05, start=0.0,
+                                         name=("step" if r == 0 else ""))
+            rm = pn.widgets.Button(name="✕", button_type="danger", width=34,
+                                   disabled=(len(bounds) <= 2))
+            colr = (registry.AXIS_KIND_BY_TYPE.get("energy").color
+                    if registry.AXIS_KIND_BY_TYPE.get("energy") else "#7E57C2")
+            tag = pn.pane.HTML("<span style='display:inline-block;width:10px;height:10px;"
+                               "border-radius:50%;background:{}'></span>".format(
+                                   _region_color(colr, r)))
+
+            def _apply(_e, idx=i, reg=r, lo=b_lo, hi=b_hi, sp=step):
+                self._energy_set_region(idx, reg, lo.value, hi.value, sp.value)
+            for w in (b_lo, b_hi, step):
+                w.param.watch(_apply, "value")
+            rm.on_click(lambda _e, idx=i, reg=r: self._energy_remove_boundary(idx, reg))
+            rows.append(pn.Row(tag, b_lo, pn.pane.HTML("→"), b_hi, step, rm))
+
+        add = pn.widgets.Button(name="+ region (split last)", width=170, button_type="primary")
+        add.on_click(lambda _e, idx=i: self._energy_add_region(idx))
+
+        plot = self._energy_plot(i, ax, pts, bounds)
+        count = pn.pane.HTML(
+            "<b>{} energy points</b> &nbsp; <span style='color:#777'>{:g}–{:g} eV</span>".format(
+                len(pts), pts[0] if pts else 0, pts[-1] if pts else 0))
+        return pn.Column(
+            pn.pane.HTML("<b>Energy regions</b> &nbsp;<span style='color:#777;font-size:12px'>"
+                         "boundaries + a step (density) per region — drag the boundary dots on the "
+                         "plot, or edit below</span>"),
+            plot, count, rows, add)
+
+    def _energy_plot(self, i, ax, pts, bounds):
+        """A Bokeh preview: energy points as dots + draggable boundary markers (write back)."""
+        try:
+            from bokeh.plotting import figure
+            from bokeh.models import ColumnDataSource, PointDrawTool, Span
+        except Exception:
+            return pn.pane.HTML("<i>(install bokeh for the visual editor)</i>")
+        colr = (registry.AXIS_KIND_BY_TYPE.get("energy").color
+                if registry.AXIS_KIND_BY_TYPE.get("energy") else "#7E57C2")
+        fig = figure(height=150, sizing_mode="stretch_width", toolbar_location=None,
+                     tools="", x_axis_label="energy (eV)", y_range=(-0.6, 1.2))
+        fig.yaxis.visible = False
+        fig.ygrid.visible = False
+        # the scan points (colored by region)
+        if pts:
+            xs, cs = [], []
+            for p in pts:
+                r = 0
+                for bi in range(len(bounds) - 1):
+                    if bounds[bi] <= p < bounds[bi + 1] or bi == len(bounds) - 2:
+                        r = bi
+                        break
+                xs.append(p)
+                cs.append(_region_color(colr, r))
+            fig.scatter(xs, [0] * len(xs), size=7, color=cs, alpha=0.85)
+        # boundary spans
+        for b in bounds:
+            fig.add_layout(Span(location=b, dimension="height", line_color="#444",
+                                line_dash="dashed", line_width=1))
+        # draggable boundary markers (y=0.7); dragging x writes back to the model
+        bsrc = ColumnDataSource(data={"x": list(bounds), "y": [0.7] * len(bounds)})
+        rend = fig.scatter("x", "y", source=bsrc, size=14, color=colr, marker="triangle",
+                           line_color="#222")
+        draw = PointDrawTool(renderers=[rend], add=False, drag=True)
+        fig.add_tools(draw)
+        fig.toolbar.active_tap = draw
+
+        def _on_drag(attr, old, new, idx=i):
+            xs = sorted(float(v) for v in (new.get("x") or []))
+            if len(xs) >= 2:
+                self._energy_set_boundaries(idx, xs)
+        bsrc.on_change("data", _on_drag)
+        return pn.pane.Bokeh(fig, sizing_mode="stretch_width")
+
+    def _energy_set_region(self, i, reg, lo, hi, step):
+        st = self.wizard
+        if not (0 <= i < len(st.axes)):
+            return
+        g = self._energy_grid(st.axes[i])
+        b, s = g["boundaries"], g["steps"]
+        if 0 <= reg < len(b) - 1:
+            b[reg] = float(lo)
+            b[reg + 1] = float(hi)
+            s[reg] = float(step)
+            # keep boundaries monotonic (a shared boundary moves both neighbors)
+            g["boundaries"] = b
+        self._render_wizard()
+
+    def _energy_set_boundaries(self, i, xs):
+        st = self.wizard
+        if not (0 <= i < len(st.axes)):
+            return
+        g = self._energy_grid(st.axes[i])
+        old = g["boundaries"]
+        # preserve the per-region steps as best we can (same count if unchanged)
+        new_b = sorted(float(x) for x in xs)
+        if len(new_b) == len(old):
+            g["boundaries"] = new_b
+        else:
+            g["boundaries"] = new_b
+            g["steps"] = (g["steps"] + [1.0] * len(new_b))[:max(0, len(new_b) - 1)]
+        self._render_wizard()
+
+    def _energy_add_region(self, i):
+        st = self.wizard
+        if not (0 <= i < len(st.axes)):
+            return
+        g = self._energy_grid(st.axes[i])
+        b, s = g["boundaries"], g["steps"]
+        # split the last region at its midpoint with the same step
+        lo, hi = b[-2], b[-1]
+        mid = round((lo + hi) / 2, 4)
+        b.insert(len(b) - 1, mid)
+        s.append(s[-1] if s else 1.0)
+        self._render_wizard()
+
+    def _energy_remove_boundary(self, i, reg):
+        st = self.wizard
+        if not (0 <= i < len(st.axes)):
+            return
+        g = self._energy_grid(st.axes[i])
+        b, s = g["boundaries"], g["steps"]
+        if len(b) > 2:
+            # removing region `reg` drops its upper boundary (merging into the next region)
+            drop = min(reg + 1, len(b) - 1)
+            b.pop(drop)
+            if reg < len(s):
+                s.pop(reg)
         self._render_wizard()
 
     # ==================================================================
@@ -1124,6 +1298,10 @@ class AcquireApp:
             fields.append(pn.Row(pn.pane.HTML("<b>Shape</b>"), sh))
         if ax.type == "incidence":
             fields.append(self._incidence_fields(i, ax))
+        elif ax.type == "energy":
+            fields.append(self._energy_fields(i, ax))
+            for f in axis_param_schema(ax.type):
+                fields.append(self._param_widget(ax, f, None, self._render_wizard))
         else:
             for f in axis_param_schema(ax.type):
                 fields.append(self._param_widget(ax, f, None, self._render_wizard))
@@ -1370,11 +1548,9 @@ class AcquireApp:
         self.tabs.param.watch(self._on_tab, "active")
 
         self.template = pn.template.FastListTemplate(
-            title="SMI-SWAXS Acquire — samples are the spine",
+            title="SMI-SWAXS Acquire",
             accent_base_color=ACCENT, header_background=ACCENT,
-            sidebar=[self.spine_panel,
-                     pn.pane.Markdown("---\n_No hardware: microscope → fake IOC; "
-                                      "validation → simulated beamline._")],
+            sidebar=[self.spine_panel],
             sidebar_width=380, main=[self.tabs],
         )
 
