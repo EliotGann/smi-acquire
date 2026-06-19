@@ -102,12 +102,21 @@ class AxisSpec:
         (inclusive of ``stop`` within float tolerance) used by value-list axes like ``incidence``
         — so the user can give a start/stop/step instead of listing every point. An explicit
         ``values`` list always wins if present.
+
+        Energy ``updown``: when ``params['updown']`` is true the expanded (ascending) energy
+        points are followed by the SAME points reversed — ``pts + pts[::-1]`` — so the scan goes
+        up to the top energy then back down to the start (doubling it, ending where it began).
+        This matches the SMI ``nexafs_run(updown=True)`` convention (the turnaround point is
+        visited twice).
         """
         p = self.params
         if p.get("values"):
             return list(p.get("values") or [])
         if self.type == "energy" and "grid" in p:
-            return energy_grid_values(p["grid"])
+            pts = energy_grid_values(p["grid"])
+            if p.get("updown") and pts:
+                pts = pts + pts[::-1]
+            return pts
         rng = p.get("range")
         if rng and len(rng) == 3:
             return _arange(float(rng[0]), float(rng[1]), float(rng[2]))

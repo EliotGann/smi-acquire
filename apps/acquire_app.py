@@ -1084,15 +1084,22 @@ class AcquireApp:
         add = pn.widgets.Button(name="+ region (split last)", width=170, button_type="primary")
         add.on_click(lambda _e, idx=i: self._energy_add_region(idx))
 
+        updown = pn.widgets.Checkbox(
+            name="↩ cycle down (there-and-back: up then back to the start, doubles the scan)",
+            value=bool(ax.params.get("updown")))
+        updown.param.watch(lambda e, idx=i: self._energy_set_updown(idx, e.new), "value")
+
         plot = self._energy_plot(i, ax, pts, bounds)
+        total = len(pts) * 2 if ax.params.get("updown") else len(pts)
+        cyc = " · ↑↓ up+down" if ax.params.get("updown") else ""
         count = pn.pane.HTML(
-            "<b>{} energy points</b> &nbsp; <span style='color:#777'>{:g}–{:g} eV</span>".format(
-                len(pts), pts[0] if pts else 0, pts[-1] if pts else 0))
+            "<b>{} energy points</b>{} &nbsp; <span style='color:#777'>{:g}–{:g} eV</span>".format(
+                total, cyc, pts[0] if pts else 0, pts[-1] if pts else 0))
         return pn.Column(
             pn.pane.HTML("<b>Energy regions</b> &nbsp;<span style='color:#777;font-size:12px'>"
                          "boundaries + a step (density) per region — drag the boundary dots on the "
                          "plot, or edit below</span>"),
-            plot, count, rows, add)
+            plot, count, rows, add, updown)
 
     def _energy_plot(self, i, ax, pts, bounds):
         """A Bokeh preview: energy points as dots + draggable boundary markers (write back)."""
@@ -1150,6 +1157,15 @@ class AcquireApp:
             s[reg] = float(step)
             # keep boundaries monotonic (a shared boundary moves both neighbors)
             g["boundaries"] = b
+        self._render_wizard()
+
+    def _energy_set_updown(self, i, on):
+        st = self.wizard
+        if 0 <= i < len(st.axes):
+            if on:
+                st.axes[i].params["updown"] = True
+            else:
+                st.axes[i].params.pop("updown", None)
         self._render_wizard()
 
     def _energy_set_boundaries(self, i, xs):

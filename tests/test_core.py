@@ -61,6 +61,19 @@ def test_energy_boundaries_via_axisspec_values():
     assert ax.n_points() == len(vals)
 
 
+def test_energy_updown_there_and_back():
+    """updown follows the up-sweep with the reversed down-sweep (ends at start, peak twice)."""
+    g = {"boundaries": [2470, 2476, 2480], "steps": [2, 1]}
+    up = AxisSpec(type="energy", params={"grid": g}).values()
+    ud = AxisSpec(type="energy", params={"grid": g, "updown": True}).values()
+    assert ud == up + up[::-1]
+    assert len(ud) == 2 * len(up)
+    assert ud[0] == ud[-1]                  # ends back at the starting energy
+    assert ud[len(up) - 1] == ud[len(up)]   # turnaround (peak) visited twice
+    # event count reflects the doubling
+    assert AxisSpec(type="energy", params={"grid": g, "updown": True}).n_points() == len(ud)
+
+
 def test_incidence_range_expands_inclusive():
     ax = AxisSpec(type="incidence", params={"range": [0.1, 0.4, 0.05]})
     assert ax.values() == [0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4]
