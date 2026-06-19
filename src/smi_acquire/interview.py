@@ -212,10 +212,9 @@ class Field:
 
 def axis_param_schema(axis_type: str) -> List[Field]:
     if axis_type == "energy":
+        # The energy grid (boundaries + per-interval density) gets a dedicated VISUAL editor in
+        # the wizard; only the scalar settle / re-seek options are simple form fields here.
         return [
-            Field("grid.edge", "Edge energy (eV)", "float", 2472.0),
-            Field("grid.near", "Near-edge [lo, hi, step] rel. to edge", "floatlist", [-2, 2, 0.25]),
-            Field("grid.post", "Post-edge [lo, hi, step] rel. to edge", "floatlist", [2, 60, 5]),
             Field("settle", "Settle after move (s)", "float", 2.0),
             Field("flux_reseek", "Re-seek beam if I0 drops", "bool", False),
         ]
@@ -268,6 +267,11 @@ def default_axis(axis_type: str, *, shape: str = "spot") -> AxisSpec:
     params: Dict[str, Any] = {}
     for f in axis_param_schema(axis_type):
         _set_dotted(params, f.key, f.default)
+    if axis_type == "energy":
+        # A sensible default boundaries+density grid (a generic edge-ish 3-region scan); the
+        # visual editor lets the user reshape/add regions. boundaries[i]..[i+1] stepped by steps[i].
+        params["grid"] = {"boundaries": [2470.0, 2472.0, 2476.0, 2530.0],
+                          "steps": [1.0, 0.25, 5.0]}
     if axis_type == "spatial":
         if shape == "spot":
             params["x"], params["y"] = [0, 30, 60, 90, 120], []

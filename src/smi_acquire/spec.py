@@ -256,14 +256,37 @@ def _arange(lo: float, hi: float, step: float) -> List[float]:
 def energy_grid_values(grid: Dict[str, Any]) -> List[float]:
     """Expand an energy ``grid`` dict into absolute eV points (deduped, sorted).
 
-    ``grid`` shape: ``{"edge": 2472, "pre": [lo,hi,step], "near": [lo,hi,step],
-    "post": [lo,hi,step]}`` where the segment ranges are *relative to the edge*. Any segment
-    may be omitted.
+    Two shapes are supported:
+
+    * **Boundaries + density (preferred, flexible N regions):**
+      ``{"boundaries": [b0, b1, ..., bN], "steps": [s0, s1, ..., s(N-1)]}`` — ``N`` contiguous
+      regions in ABSOLUTE eV, each ``[b_i, b_{i+1})`` stepped by ``s_i`` (the last region
+      includes its final boundary).  This is the ``np.arange(b0,b1,s0)+np.arange(b1,b2,s1)+…``
+      pattern: e.g. a sulfur scan ``boundaries=[2445,2470,2480,2490,2501]``,
+      ``steps=[5,0.25,1,5]``.  Add/remove boundaries to get 3, 4, 5+ regions.
+    * **Edge-relative segments (back-compat):** ``{"edge": 2472, "pre"/"near"/"post":
+      [lo,hi,step]}`` where the segment ranges are relative to ``edge``.  Any segment may be
+      omitted.
     """
+    # Preferred: boundaries + per-interval density (absolute eV).
+    bounds = grid.get("boundaries")
+    steps = grid.get("steps")
+    if bounds and steps and len(bounds) >= 2 and len(steps) >= len(bounds) - 1:
+        # Each region is np.arange(b_i, b_{i+1}, s_i) -- half-open [b_i, b_{i+1}), exactly the
+        # ``np.arange(...)+np.arange(...)`` chain.  Half-open everywhere means a shared boundary
+        # is owned by the next region (visited once), and the upper boundary is the bound, not a
+        # visited point (so e.g. stop=2501 with step 5 reaches 2500), matching np.arange.
+        pts: List[float] = []
+        for i in range(len(bounds) - 1):
+            lo, hi, step = float(bounds[i]), float(bounds[i + 1]), float(steps[i])
+            pts.extend(v for v in _arange(lo, hi, step) if v < hi - 1e-9)
+        return sorted(set(round(p, 6) for p in pts))
+
+    # Back-compat: edge-relative pre/near/post segments.
     edge = float(grid.get("edge", 0.0))
-    pts: List[float] = []
-    for seg in ("pre", "near", "post"):
-        rng = grid.get(seg)
+    pts = []
+    for seg_name in ("pre", "near", "post"):
+        rng = grid.get(seg_name)
         if rng and len(rng) == 3:
             pts.extend(edge + v for v in _arange(float(rng[0]), float(rng[1]), float(rng[2])))
     return sorted(set(round(p, 6) for p in pts))

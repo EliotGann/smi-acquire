@@ -37,6 +37,30 @@ def test_energy_grid_expansion_is_exact():
     assert len(vals) == 17 + 12 - 1
 
 
+def test_energy_boundaries_density_matches_np_arange_chain():
+    """boundaries+steps reproduces the np.arange(...)+np.arange(...) sulfur scan exactly."""
+    import numpy as np
+    vals = energy_grid_values(
+        {"boundaries": [2445, 2470, 2480, 2490, 2501], "steps": [5, 0.25, 1, 5]})
+    expected = (np.arange(2445, 2470, 5).tolist() + np.arange(2470, 2480, 0.25).tolist()
+                + np.arange(2480, 2490, 1).tolist() + np.arange(2490, 2501, 5).tolist())
+    assert vals == sorted(set(round(v, 6) for v in expected))
+
+
+def test_energy_boundaries_half_open_no_double_count():
+    # shared boundaries are owned by the next region (visited once); upper bound not visited
+    vals = energy_grid_values({"boundaries": [0, 10, 20], "steps": [5, 2]})
+    assert vals == [0.0, 5.0, 10.0, 12.0, 14.0, 16.0, 18.0]   # 10 from region 2, 20 excluded
+
+
+def test_energy_boundaries_via_axisspec_values():
+    ax = AxisSpec(type="energy",
+                  params={"grid": {"boundaries": [2470, 2476, 2530], "steps": [0.25, 5]}})
+    vals = ax.values()
+    assert vals[0] == 2470.0
+    assert ax.n_points() == len(vals)
+
+
 def test_incidence_range_expands_inclusive():
     ax = AxisSpec(type="incidence", params={"range": [0.1, 0.4, 0.05]})
     assert ax.values() == [0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4]
