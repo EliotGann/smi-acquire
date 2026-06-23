@@ -142,7 +142,10 @@ def test_project_name_flows_to_experiment_and_acquire_md():
     assert spec.project_name == "311234_Doe"
 
     src = codegen.render(spec)
-    call = [ln for ln in src.splitlines() if ln.startswith("RE(acquire")][0]
+    # the acquire/acquire_bar call is wrapped in run_plan() (so det_exposure_time can be
+    # yield-from'd); the project_name lands in its md
+    assert "md={'project_name': '311234_Doe'}" in src
+    call = [ln for ln in src.splitlines() if "acquire" in ln and "md={'project_name'" in ln][0]
     assert "md={'project_name': '311234_Doe'}" in call
 
 

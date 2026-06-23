@@ -310,7 +310,6 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
     L.append("")
 
     # ---- the run ----------------------------------------------------------
-    L.append("det_exposure_time({0}, {0})".format(_num(spec.beam.exposure_s)))
     call_kwargs = [
         "reads=reads",
         "geometry={!r}".format(ap.geometry),
@@ -341,8 +340,14 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
         call = "acquire(bar[0].name, dets, axes_for(bar[0]), sample=bar[0], {})".format(
             ", ".join(call_kwargs))
 
+    # Wrap in a plan so det_exposure_time (now a plan) is `yield from`'d -- a bare top-level
+    # det_exposure_time(...) creates an unconsumed generator and the exposure is never set.
+    L.append("def run_plan():")
+    L.append("    yield from det_exposure_time({0}, {0})".format(_num(spec.beam.exposure_s)))
+    L.append("    return (yield from {})".format(call))
+    L.append("")
     L.append("# ---- RUN THIS ----")
-    L.append("RE({})".format(call) if run else "plan = {}".format(call))
+    L.append("RE(run_plan())" if run else "plan = run_plan()")
 
     text = "\n".join(L)
     # collapse accidental triple blank lines

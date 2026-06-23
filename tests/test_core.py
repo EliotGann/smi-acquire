@@ -161,6 +161,23 @@ def test_codegen_multi_sample_uses_acquire_bar():
     ast.parse(src)
 
 
+def test_codegen_det_exposure_time_is_yielded_from():
+    """det_exposure_time is now a plan: it must be `yield from`'d inside run_plan(), never a
+    bare top-level call (which would create an unconsumed generator -> exposure never set)."""
+    sp = ExperimentSpec(axes=[interview.default_axis("energy")])
+    sp.samples.rows = [{"name": "a"}]
+    src = codegen.render(sp)
+    assert "yield from det_exposure_time(" in src
+    # no bare det_exposure_time statement (every occurrence is a yield-from)
+    for line in src.splitlines():
+        s = line.strip()
+        if s.startswith("det_exposure_time("):
+            raise AssertionError("bare det_exposure_time call: " + s)
+    assert "def run_plan():" in src
+    assert "RE(run_plan())" in src
+    ast.parse(src)
+
+
 def test_codegen_single_sample_uses_acquire():
     sp = ExperimentSpec(axes=[interview.default_axis("energy")])
     sp.samples.rows = [{"name": "only"}]
