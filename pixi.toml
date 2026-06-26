@@ -17,12 +17,16 @@ pydantic = ">=2"
 scikit-image = "*"
 shapely = "*"
 watchfiles = "*"
-# EPICS + bluesky stack (fake IOC for the microscope; SimBeamline for dry-runs)
+# EPICS + bluesky stack (fake IOC for the microscope; SimBeamline for dry-runs).
+# `bluesky-base` is the lightweight variant: same `bluesky` Python package (plan_stubs /
+# preprocessors / plans / RunEngine — all this app imports) but WITHOUT the heavy interactive
+# analysis pulls of the full `bluesky` meta-package (databroker → tiled → duckdb/pyarrow/xarray
+# → numba/llvmlite, and matplotlib → Qt). Saves ~250 MB / ~150 packages with no feature loss.
 pyepics = "*"
 ophyd = "*"
 caproto = "*"
 p4p = "*"
-bluesky = "*"
+bluesky-base = "*"
 pytest = "*"
 ruff = "*"
 
