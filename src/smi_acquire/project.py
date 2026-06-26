@@ -50,6 +50,33 @@ def _sample_priority(sample) -> int:
         return 0
 
 
+def _sample_project(sample) -> str:
+    """A sample's project_name (``Sample.md['project_name']``), or "" if unset.
+
+    Per-sample so project can vary across a bar; carried into each run's md by ``acquire_bar``.
+    """
+    v = (sample.md or {}).get("project_name")
+    return str(v) if v else ""
+
+
+def _common_holder_name(samples, store):
+    """The single holder NAME shared by every sample, or None if they span/lack holders.
+
+    When all samples sit on one holder, codegen can reference it by name (``load_holder``);
+    otherwise it falls back to ``from_columns``.  ``store`` is an ``AcquireStore``.
+    """
+    if not samples:
+        return None
+    holder_ids = {getattr(s, "holder_id", None) for s in samples}
+    if len(holder_ids) != 1:
+        return None
+    hid = next(iter(holder_ids))
+    if not hid:
+        return None
+    holder = store.holder_by_id(hid)
+    return holder.name if holder is not None else None
+
+
 # ---------------------------------------------------------------------------
 # Reference (local fiducial marker)
 # ---------------------------------------------------------------------------
@@ -149,20 +176,31 @@ class Experiment:
 
     # ---- projection into the codegen/dryrun model -------------------------
     def to_spec(self, samples, *, project_name: str = "",
-                motor_object: str = "piezo") -> ExperimentSpec:
+                motor_object: str = "piezo", holder_name: Optional[str] = None) -> ExperimentSpec:
         """Build an :class:`ExperimentSpec` over a resolved subset of ``smi_plans.Sample``.
 
-        ``samples`` are the (already target-resolved) redis samples; each becomes a
-        ``SampleList.from_columns`` row via :func:`smi_acquire.store.sample_to_row`.  The
-        experiment's own ``project_name`` wins over the caller's (the Project name fallback).
+        ``samples`` are the (already target-resolved, priority-ordered) redis samples; each
+        becomes a ``SampleList.from_columns`` row via :func:`smi_acquire.store.sample_to_row`.
+
+        When every sample belongs to **one** named holder (``holder_name``), the samples block is
+        marked ``source="holder"`` so codegen emits ``load_holder(holder_name)`` (Redis-first, no
+        copy-paste); otherwise it stays ``"inline"`` (the ``from_columns`` fallback).  Per-sample
+        ``project_name`` (from each sample's ``md``) is carried alongside, falling back to the
+        experiment's / project's name.  The experiment's own ``project_name`` wins over the
+        caller's (the Project name fallback).
         """
         rows = [sample_to_row(s) for s in samples]
+        default_project = self.project_name or project_name
+        project_names = [_sample_project(s) or default_project for s in samples]
+        source = "holder" if (holder_name and samples) else "inline"
         return ExperimentSpec(
-            project_name=self.project_name or project_name,
+            project_name=default_project,
             scan_name=self.scan_name, md=dict(self.md),
             beam=self.beam, apparatus=self.apparatus, axes=self.axes,
             manual_setup=self.manual_setup,
-            samples=SamplesSpec(rows=rows, motor_object=motor_object),
+            samples=SamplesSpec(rows=rows, motor_object=motor_object,
+                                source=source, holder=holder_name if source == "holder" else None,
+                                project_names=project_names),
         )
 
     @classmethod
@@ -213,8 +251,10 @@ class Project:
 
     # ---- codegen / validation per experiment ------------------------------
     def experiment_spec(self, experiment: Experiment, store) -> ExperimentSpec:
-        return experiment.to_spec(self.resolve_target(experiment, store),
-                                  project_name=self.name, motor_object=self.motor_object)
+        samples = self.resolve_target(experiment, store)
+        holder_name = _common_holder_name(samples, store)
+        return experiment.to_spec(samples, project_name=self.name,
+                                  motor_object=self.motor_object, holder_name=holder_name)
 
     # ---- serialization ----------------------------------------------------
     def to_dict(self) -> Dict[str, Any]:

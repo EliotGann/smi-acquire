@@ -239,10 +239,11 @@ class AcquireApp:
         self.spine = pn.widgets.Tabulator(
             value=self._spine_df(), show_index=False, selectable="checkbox", height=320,
             theme="simple",
-            widths={"name": 104, "pri": 40, "holder": 80, "x": 56, "y": 56, "z": 48,
-                    "incidence": 70, "scan": 44, "ref": 38, "active": 44, "md": 100},
+            widths={"name": 96, "pri": 38, "project": 78, "holder": 76, "x": 52, "y": 52,
+                    "z": 46, "incidence": 66, "scan": 42, "ref": 36, "active": 42, "md": 92},
             editors={"name": {"type": "input"}, "holder": {"type": "input"},
                      "incidence": {"type": "input"}, "md": {"type": "input"},
+                     "project": {"type": "input"},
                      "pri": {"type": "number"},
                      "scan": {"type": "tickCross"},
                      "x": None, "y": None, "z": None, "ref": None, "active": None},
@@ -277,6 +278,11 @@ class AcquireApp:
         self.move_holder = pn.widgets.Select(options=self._holder_options(), width=140)
         move_btn = pn.widgets.Button(name="→ move sel. to holder", width=170)
         move_btn.on_click(self._on_move_holder)
+        # Bulk-set the project of every sample on the selected sample's holder.
+        self.holder_project = pn.widgets.TextInput(placeholder="project for whole holder…",
+                                                   width=180)
+        holder_project_btn = pn.widgets.Button(name="→ set holder's project", width=170)
+        holder_project_btn.on_click(self._on_set_holder_project)
 
         imp = pn.widgets.FileInput(accept=".csv", name="import")
         imp.param.watch(self._on_import_csv, "value")
@@ -313,6 +319,7 @@ class AcquireApp:
             pn.pane.Markdown("**Holders**"),
             pn.Row(new_holder, mk_holder),
             pn.Row(self.move_holder, move_btn),
+            pn.Row(self.holder_project, holder_project_btn),
             pn.layout.Divider(),
             pn.pane.Markdown("**Import / export**"),
             pn.Row(imp),
@@ -347,6 +354,7 @@ class AcquireApp:
             rows.append({
                 "name": s.name,
                 "pri": self._sample_priority(s),
+                "project": self._sample_project(s),
                 "holder": holder.name if holder is not None else "",
                 "x": x, "y": y, "z": z,
                 "incidence": _fmt_floatlist(angles),
@@ -361,6 +369,7 @@ class AcquireApp:
             rows.append({
                 "name": r.name,
                 "pri": "",
+                "project": "",
                 "holder": "",
                 "x": r.x, "y": r.y, "z": r.z,
                 "incidence": "",
@@ -370,7 +379,7 @@ class AcquireApp:
                 "md": "",
             })
         return pd.DataFrame(
-            rows, columns=["name", "pri", "holder", "x", "y", "z", "incidence",
+            rows, columns=["name", "pri", "project", "holder", "x", "y", "z", "incidence",
                            "scan", "ref", "active", "md"])
 
     @staticmethod
@@ -387,11 +396,21 @@ class AcquireApp:
             return 0
 
     @staticmethod
+    def _sample_project(sample) -> str:
+        """The sample's project_name (``Sample.md['project_name']``, default "").
+
+        Per-sample so project can vary across a bar; carried into each run's md by acquire_bar.
+        Every scan should carry a project_name (the experiment/project name is the fallback).
+        """
+        v = (sample.md or {}).get("project_name")
+        return str(v) if v else ""
+
+    @staticmethod
     def _display_md(md) -> str:
-        """The md JSON shown in the spine, minus ``priority`` (which has its own column)."""
+        """The md JSON shown in the spine, minus the fields that have their own columns."""
         if not md:
             return ""
-        shown = {k: v for k, v in md.items() if k != "priority"}
+        shown = {k: v for k, v in md.items() if k not in ("priority", "project_name")}
         return json.dumps(shown) if shown else ""
 
 
@@ -570,12 +589,15 @@ class AcquireApp:
             self.store.update_sample(s)
         elif col == "pri":
             self._set_sample_priority(s, val)
+        elif col == "project":
+            self._set_sample_project(s, val)
         elif col == "md":
             try:
                 new_md = json.loads(val) if str(val).strip() else {}
-                # The md column hides 'priority' (it has its own column); preserve it.
-                if "priority" in s.md and "priority" not in new_md:
-                    new_md["priority"] = s.md["priority"]
+                # The md column hides fields that have their own columns; preserve them.
+                for hidden in ("priority", "project_name"):
+                    if hidden in s.md and hidden not in new_md:
+                        new_md[hidden] = s.md[hidden]
                 s.md = new_md
                 self.store.update_sample(s)
             except Exception:
@@ -583,6 +605,21 @@ class AcquireApp:
         self.refresh_spine()
 
     # ---- run-order (priority) -------------------------------------------
+    def _update_sample_md(self, sample, key, value):
+        """Set/clear ONE md key on the **live** sample (re-fetched), preserving other md fields.
+
+        Re-reading by id before writing avoids clobbering concurrently-set md keys (priority /
+        project_name / user fields) when a caller holds a stale ``Sample`` snapshot.
+        """
+        live = self.store.sample_by_id(getattr(sample, "id", None)) or sample
+        live.md = dict(live.md or {})
+        if value is None:
+            live.md.pop(key, None)
+        else:
+            live.md[key] = value
+        self.store.update_sample(live)
+        return live
+
     def _set_sample_priority(self, sample, value, *, refresh=False):
         """Persist a sample's run-order priority on ``Sample.md['priority']`` (stopgap)."""
         try:
@@ -590,9 +627,7 @@ class AcquireApp:
         except (TypeError, ValueError):
             _toast("priority must be a whole number", "warning")
             return
-        sample.md = dict(sample.md or {})
-        sample.md["priority"] = pri
-        self.store.update_sample(sample)
+        self._update_sample_md(sample, "priority", pri)
         if refresh:
             self.refresh_spine()
 
@@ -640,6 +675,36 @@ class AcquireApp:
                 changed += 1
         self.refresh_spine()
         _toast("renumbered {} sample(s) 1..{}".format(len(ordered), len(ordered)))
+
+    # ---- per-sample project_name ----------------------------------------
+    def _set_sample_project(self, sample, value, *, refresh=False):
+        """Persist a sample's project on ``Sample.md['project_name']`` (carried into its run md).
+
+        Empty clears it (the experiment/project name is then the fallback at codegen time).
+        """
+        name = str(value or "").strip()
+        self._update_sample_md(sample, "project_name", name or None)
+        if refresh:
+            self.refresh_spine()
+
+    def _on_set_holder_project(self, _e):
+        """Bulk-set the project_name of every sample on the selected sample's holder."""
+        s = self._selected_sample()
+        if s is None:
+            _toast("select a sample on the holder you want to set", "warning")
+            return
+        name = (self.holder_project.value or "").strip()
+        hid = s.holder_id
+        if not hid:
+            _toast("that sample is not on a holder", "warning")
+            return
+        members = self.store.list_samples(holder_id=hid)
+        for m in members:
+            self._set_sample_project(m, name)
+        holder = self.store.holder_by_id(hid)
+        self.refresh_spine()
+        _toast("set project '{}' on {} sample(s) in holder '{}'".format(
+            name or "(cleared)", len(members), holder.name if holder else "?"))
 
     def _edit_reference(self, ref_id, col, val):
         """Apply an inline edit to a reference row (only its name is editable here)."""

@@ -62,12 +62,17 @@ _STACK_COLS = ["piezo_x", "piezo_y", "piezo_z", "piezo_th",
                "hexa_x", "hexa_y", "hexa_z", "hexa_th"]
 
 
-def render_samplelist(spec: ExperimentSpec, *, var: str = "bar") -> str:
-    """Emit a ``SampleList.from_columns(...)`` block from the spec's sample rows.
+def render_samplelist(spec: ExperimentSpec, *, var: str = "bar", named_lists: bool = True) -> str:
+    """Emit the samples block.
 
-    Only columns actually populated are emitted. ``incident_angles`` is emitted shared when
-    identical across rows, else per-sample. Falls back to a single placeholder sample.
+    Redis-first: when ``spec.samples.source == "holder"`` every sample is on one named holder, so
+    emit ``load_holder(holder)`` (no copy-paste of coordinates; per-sample md — including
+    ``project_name`` — travels with each loaded sample).  Otherwise (or under ``named_lists=False``
+    for a store-free dry-run) fall back to ``SampleList.from_columns(...)`` built from the rows.
     """
+    if named_lists and spec.samples.source == "holder" and spec.samples.holder:
+        return "{} = load_holder({!r})".format(var, spec.samples.holder)
+
     rows = spec.samples.rows
     if not rows:
         rows = [{"name": "sample1"}]
@@ -88,13 +93,38 @@ def render_samplelist(spec: ExperimentSpec, *, var: str = "bar") -> str:
         else:
             lines.append("    incident_angles={},".format(_pyval(ia)))
 
-    if any(r.get("md") for r in rows):
-        lines.append("    md={},".format(_pyval([dict(r.get("md", {})) for r in rows])))
-    elif spec.project_name:
-        lines.append("    md={{'project_name': {!r}}},".format(spec.project_name))
+    # Per-sample md (carries each sample's project_name etc.); fall back to a shared project_name.
+    per_md = _samplelist_md(spec)
+    if per_md is not None:
+        lines.append("    md={},".format(per_md))
 
     lines.append(")")
     return "\n".join(lines)
+
+
+def _samplelist_md(spec: ExperimentSpec):
+    """The ``md=`` argument source for ``from_columns``, or None if there's nothing to emit.
+
+    Folds each sample's ``project_name`` (from ``samples.project_names``) into its row md so the
+    fallback ``from_columns`` path carries per-sample project, matching the ``load_holder`` path.
+    """
+    rows = spec.samples.rows or [{}]
+    projects = spec.samples.project_names or []
+    md_list = []
+    any_md = False
+    for i, r in enumerate(rows):
+        m = dict(r.get("md", {}) or {})
+        pj = projects[i] if i < len(projects) else None
+        if pj and "project_name" not in m:
+            m["project_name"] = pj
+        if m:
+            any_md = True
+        md_list.append(m)
+    if any_md:
+        return _pyval(md_list)
+    if spec.project_name:
+        return "{{'project_name': {!r}}}".format(spec.project_name)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -263,8 +293,14 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
     L += [
         "from smi_plans._compose import ({})".format(", ".join(sorted(set(compose_imports)))),
         "from smi_plans._core import saxs_waxs_dets",
-        "from smi_plans import SampleList",
     ]
+    # Redis-first samples: reference the holder by name (load_holder). The dry-run inlines the
+    # bar via from_columns (store-free), so only the copy-paste script imports load_holder.
+    use_holder = named_lists and spec.samples.source == "holder" and bool(spec.samples.holder)
+    if use_holder:
+        L.append("from smi_plans import load_holder")
+    else:
+        L.append("from smi_plans import SampleList")
     # Redis-first: a named energy list resolves from the shared store by name. resolve_list
     # requires the store, so open one in the script and pass it (mirrors load_holder's seam).
     # Skipped under for_dryrun (values are inlined for a store-free dry-run).
@@ -282,7 +318,7 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
     L.append("")
 
     # ---- sample bar -------------------------------------------------------
-    L.append(render_samplelist(spec))
+    L.append(render_samplelist(spec, named_lists=named_lists))
     L.append("")
 
     # ---- beam / q ---------------------------------------------------------

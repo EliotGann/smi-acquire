@@ -129,6 +129,83 @@ def test_render_experiment_compiles():
     assert "acquire_bar(" in src  # A and C → multi-sample
 
 
+# ---------------------------------------------------------------------------
+# Redis-first samples: load_holder when all samples share one holder
+# ---------------------------------------------------------------------------
+def test_holder_target_emits_load_holder():
+    acq = _demo_store()
+    hot = acq.holder_by_name("hot")
+    exp = Experiment(name="e", axes=[interview.default_axis("incidence")],
+                     target=Target(kind="holder", holder_id=hot.id))
+    proj = Project(name="proj1")
+    spec = proj.experiment_spec(exp, acq)
+    assert spec.samples.source == "holder"
+    assert spec.samples.holder == "hot"
+    src = codegen.render(spec)
+    assert 'load_holder(\'hot\')' in src
+    assert "from smi_plans import load_holder" in src
+    assert "from_columns" not in src
+    ast.parse(src)
+
+
+def test_mixed_holders_fall_back_to_from_columns():
+    """A 'samples' target spanning two holders can't load_holder -> from_columns fallback."""
+    acq = _demo_store()                          # A,C on hot; B on cold
+    ids = [s.id for s in acq.list_samples() if s.name in ("A", "B")]   # spans hot+cold
+    exp = Experiment(name="e", axes=[interview.default_axis("incidence")],
+                     target=Target(kind="samples", sample_ids=ids))
+    proj = Project(name="proj1")
+    spec = proj.experiment_spec(exp, acq)
+    assert spec.samples.source == "inline"
+    src = codegen.render(spec)
+    assert "from_columns" in src and "load_holder" not in src
+    ast.parse(src)
+
+
+def test_dryrun_render_uses_from_columns_even_for_holder():
+    """The dry-run render must be store-free: from_columns even when the script uses load_holder."""
+    acq = _demo_store()
+    hot = acq.holder_by_name("hot")
+    exp = Experiment(name="e", axes=[interview.default_axis("incidence")],
+                     target=Target(kind="holder", holder_id=hot.id))
+    proj = Project(name="proj1")
+    spec = proj.experiment_spec(exp, acq)
+    dsrc = codegen.render(spec, for_dryrun=True)
+    assert "from_columns" in dsrc and "load_holder" not in dsrc
+    ast.parse(dsrc)
+
+
+def test_per_sample_project_name_flows_to_rows():
+    """project_name varies per sample (Sample.md) and rides each row / the run md fallback."""
+    acq = AcquireStore.connect(offline=True)
+    h = acq.ensure_holder("bar1")
+    acq.add_sample("A", holder_id=h.id, nominal=Position(frame="holder", piezo_x=1.0),
+                   md={"project_name": "proj_A"})
+    acq.add_sample("B", holder_id=h.id, nominal=Position(frame="holder", piezo_x=2.0))  # no project
+    exp = Experiment(name="e", axes=[interview.default_axis("incidence")],
+                     target=Target(kind="holder", holder_id=h.id))
+    proj = Project(name="fallback_proj")
+    spec = proj.experiment_spec(exp, acq)
+    # per-sample project list: A explicit, B falls back to the project name
+    assert spec.samples.project_names == ["proj_A", "fallback_proj"]
+    # dry-run (from_columns) carries per-sample project in row md
+    dsrc = codegen.render(spec, for_dryrun=True)
+    assert "proj_A" in dsrc and "fallback_proj" in dsrc
+    ast.parse(dsrc)
+
+
+def test_default_holder_makes_samples_load_holder_able():
+    """A blank sample lands on the default holder, so a single-holder bar references it by name."""
+    acq = AcquireStore.connect(offline=True)
+    s = acq.add_sample("solo")                    # no holder given -> default holder
+    assert s.holder_id is not None
+    exp = Experiment(name="e", axes=[interview.default_axis("energy")],
+                     target=Target(kind="all"))
+    spec = Project().experiment_spec(exp, acq)
+    assert spec.samples.source == "holder"        # all samples share the default holder
+    ast.parse(codegen.render(spec))
+
+
 def test_experiment_from_spec_roundtrips_recipe():
     spec = interview.seed_spec_from_intake(
         {"geometry": "reflection", "varying": ["temperature", "energy"], "heater": "linkam"})

@@ -154,10 +154,24 @@ class ManualSetupStep:
 
 @dataclass
 class SamplesSpec:
-    """One run per sample. Rows usually come from the interactive microscope bookmark list."""
-    source: str = "inline"                       # "inline" | "csv"
+    """One run per sample.
+
+    Rows come from the shared sample store (target-resolved).  ``source`` selects how the
+    generated script names them:
+
+    * ``"holder"`` — Redis-first: every sample belongs to one named holder, so the script emits
+      ``load_holder(holder)`` (no copy-paste of coordinates).  ``holder`` is that holder's name.
+    * ``"inline"`` / ``"csv"`` — the fallback: emit ``SampleList.from_columns(...)`` from ``rows``
+      (used when the samples span holders, have no holder, or are an ad-hoc selection).
+
+    ``project_names`` is the per-sample project (parallel to ``rows``); each is carried into that
+    sample's run md (``project_name`` may vary per sample).
+    """
+    source: str = "inline"                       # "inline" | "csv" | "holder"
     rows: List[Dict[str, Any]] = field(default_factory=list)     # SampleList.to_dicts() shape
     motor_object: str = "piezo"                  # which stack the x/y/z map onto
+    holder: Optional[str] = None                 # holder NAME when source == "holder"
+    project_names: List[Optional[str]] = field(default_factory=list)  # per-sample, parallel rows
 
 
 @dataclass
