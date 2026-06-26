@@ -174,7 +174,7 @@ class AreaMode:
             pn.pane.Markdown(
                 "Use the **Polygon Draw** tool (auto-selected on this tab) to click vertices "
                 "(double-click to close), then **Polygon Edit** to drag vertices. Tick **scan** "
-                "on bookmarks in the **Bookmarks** list to replicate the grid onto each; with "
+                "on samples in the **Sample list** (sidebar) to replicate the grid onto each; with "
                 "none ticked, the single drawn area is scanned. Enable the overlay with the "
                 "**Polygon** toggle in the Quick scripts panel."
             ),

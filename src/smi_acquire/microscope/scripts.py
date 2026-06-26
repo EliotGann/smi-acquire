@@ -290,7 +290,7 @@ def square_grid_scans_at_bookmarks(
     bms = _scan_bookmarks(bookmarks)
     if not bms:
         return (
-            "# no square scans yet — tick a bookmark's 'scan' box in the Bookmarks list, or use 'Add point'\n"
+            "# no square scans yet — tick a sample's 'scan' box in the Sample list, or use 'Add point'\n"
         )
     if not (width > 0 and height > 0 and nx >= 1 and ny >= 1):
         return "# set a positive width, height, and step to populate this script\n"
@@ -342,7 +342,7 @@ def polygon_scans_at_bookmarks(
     bms = _scan_bookmarks(bookmarks)
     if not bms:
         return (
-            "# no polygon scans yet — tick a bookmark's 'scan' box in the Bookmarks list (with a polygon drawn)\n"
+            "# no polygon scans yet — tick a sample's 'scan' box in the Sample list (with a polygon drawn)\n"
         )
     if not offsets:
         return "# draw a polygon to populate this script\n"
@@ -403,7 +403,7 @@ def line_scans_at_bookmarks(
     bms = _scan_bookmarks(bookmarks)
     if not bms:
         return (
-            "# no line scans yet — tick a bookmark's 'scan' box in the Bookmarks list, or use 'Add point'\n"
+            "# no line scans yet — tick a sample's 'scan' box in the Sample list, or use 'Add point'\n"
         )
     if not (distance > 0 and num >= 2):
         return "# set a positive distance and ≥2 points to populate this script\n"

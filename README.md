@@ -56,14 +56,18 @@ at your hardware); `app` defaults to localhost-only EPICS so it can only ever se
 
 ## The app: a sample list with two screens
 
-The **sample list is the spine** — a persistent sidebar table present on both screens. Samples
-carry an optional position + free metadata + sample-set membership; a positioned, *visible*
-sample shows as a marker on the live image.
+The **sample list is the spine** — a single persistent sidebar table present on both screens
+and the one source of truth for samples. Samples carry an optional position + free metadata +
+holder membership; a positioned, *visible* sample shows as a marker on the live image.
+References (fiducial landmarks) appear in the same list, flagged **ref** (yellow on the image,
+never scanned).
 
 **Align & Samples** (home)
 - The on-axis microscope: live camera, click-to-move, and the **Scan** tabs for fast
-  line / grid / polygon **alignment** (useful standalone, no plan required).
-- Capture stage positions into the spine: **★ new sample here** / **assign → selected** /
+  line / grid / polygon **alignment** (useful standalone, no plan required). Tick **scan** on a
+  sample in the sidebar list to make it a target for those scans; **→ go to position** moves the
+  stage to the selected row.
+- Capture stage positions into the spine: **★ new sample here** / **assign → selected sample** /
   **+ reference here**, reading the live motor positions.
 
 **Plan**

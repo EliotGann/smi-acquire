@@ -157,35 +157,42 @@ class AcquireApp:
         self.executor = LocalExecutor(interlock=self.interlock)
         self.micro = None                 # MicroscopeUI (lazy: needs the IOC)
         self.current_exp: Experiment | None = None
-        self._spine_ids: list[str] = []   # store sample ids, parallel to the spine df rows
+        # Typed identity for each master-list row, parallel to the spine df:
+        #   ("sample", sample_id) for store samples; ("ref", reference_id) for project refs.
+        self._spine_rows: list[tuple[str, str]] = []
         self._build()
 
     # -- microscope marker sync --------------------------------------------
     def sync_markers(self):
-        """Push markers onto the image: positioned store samples (lime) + local references (yellow)."""
+        """Push the master list into the microscope engine: positioned store samples (lime) +
+        local references (yellow). The engine renders the markers and exposes the scan targets;
+        it owns no list of its own. Scan-target ticks (``in_scan``) are preserved across the push
+        by name so toggling the master list's ``scan`` column survives a refresh.
+        """
         if self.micro is None:
             return
         from smi_acquire.microscope.scripts import Bookmark as MBookmark
         inter = self.micro.interactive
-        bms, mab = [], []
+        # Remember which sample names were ticked for scanning, to carry the flag across.
+        try:
+            ticked = {b.name for b in inter.get_scan_targets()}
+        except Exception:
+            ticked = set()
+        entries = []
         for s in self.store.list_samples():
             xyz = self._sample_xyz(s)
             if xyz is None:
                 continue
             x, y, z = xyz
-            bms.append(MBookmark(name=s.name, x=x, y=y, z=z, is_reference=False))
-            mab.append((x, y, z))
+            entries.append(MBookmark(name=s.name, x=x, y=y, z=z, is_reference=False,
+                                     in_scan=s.name in ticked))
         for r in self.project.references:
             if not r.visible:
                 continue
             x, y, z = (r.x or 0.0), (r.y or 0.0), (r.z or 0.0)
-            bms.append(MBookmark(name=r.name, x=x, y=y, z=z, is_reference=True))
-            mab.append((x, y, z))
-        inter._bookmarks = bms            # noqa: SLF001 (intentional bridge into vendored mode)
-        inter._motor_at_bookmark = mab    # noqa: SLF001
+            entries.append(MBookmark(name=r.name, x=x, y=y, z=z, is_reference=True))
         try:
-            inter.tick()
-            inter.tick_table()
+            inter.set_samples(entries)
         except Exception:
             pass
 
@@ -230,11 +237,13 @@ class AcquireApp:
         self.spine = pn.widgets.Tabulator(
             value=self._spine_df(), show_index=False, selectable="checkbox", height=320,
             theme="simple",
-            widths={"name": 110, "holder": 90, "x": 60, "y": 60, "z": 52, "incidence": 80,
-                    "active": 50, "md": 120},
+            widths={"name": 110, "holder": 84, "x": 58, "y": 58, "z": 50, "incidence": 74,
+                    "scan": 46, "ref": 40, "active": 48, "md": 110},
             editors={"name": {"type": "input"}, "holder": {"type": "input"},
                      "incidence": {"type": "input"}, "md": {"type": "input"},
-                     "x": None, "y": None, "z": None, "active": None},
+                     "scan": {"type": "tickCross"},
+                     "x": None, "y": None, "z": None, "ref": None, "active": None},
+            formatters={"scan": {"type": "tickCross"}, "ref": {"type": "tickCross"}},
         )
         self.spine.on_edit(self._on_spine_edit)
 
@@ -244,6 +253,8 @@ class AcquireApp:
         rm.on_click(self._on_remove_selected)
         load = pn.widgets.Button(name="◆ load (set active)", button_type="primary", width=160)
         load.on_click(self._on_set_active)
+        goto = pn.widgets.Button(name="→ go to position", width=150)
+        goto.on_click(self._on_goto_selected)
 
         # Holders sub-panel (replaces the old "Sets").
         new_holder = pn.widgets.TextInput(placeholder="new holder name…", width=130)
@@ -275,7 +286,12 @@ class AcquireApp:
             self.spine_count,
             self.spine,
             pn.Row(add, rm),
-            pn.Row(load),
+            pn.Row(load, goto),
+            pn.pane.Markdown(
+                "<span style='color:#777;font-size:11px'>Tick <b>scan</b> to include a sample "
+                "as a target for the Scan tabs. <b>ref</b> marks a reference landmark (yellow on "
+                "the image, never scanned). <b>go to position</b> moves the stage to the selected "
+                "row.</span>"),
             self.sample_detail,
             pn.layout.Divider(),
             pn.pane.Markdown("**Holders**"),
@@ -289,12 +305,20 @@ class AcquireApp:
         )
 
     def _spine_df(self):
+        """Build the single master list: store samples + project references, flagged.
+
+        ``_spine_rows`` is the parallel typed identity for each row — ``("sample", id)`` or
+        ``("ref", id)`` — so selection actions know what each selected row is.  The ``scan``
+        flag is read back from the microscope engine (where per-session scan-target state
+        lives); ``ref`` rows are never scan targets.
+        """
         active = self.store.active_sample()
         active_id = active.id if active is not None else None
-        self._spine_ids = []
+        scan_names = self._scan_ticked_names()
+        self._spine_rows: list[tuple[str, str]] = []
         rows = []
         for s in self.store.list_samples():
-            self._spine_ids.append(s.id)
+            self._spine_rows.append(("sample", s.id))
             holder = self.store.holder_by_id(s.holder_id) if s.holder_id else None
             p = s.nominal
             x = p.piezo_x if p.piezo_x is not None else p.stage_x
@@ -306,11 +330,37 @@ class AcquireApp:
                 "holder": holder.name if holder is not None else "",
                 "x": x, "y": y, "z": z,
                 "incidence": _fmt_floatlist(angles),
+                "scan": s.name in scan_names,
+                "ref": False,
                 "active": "◆" if s.id == active_id else "",
                 "md": json.dumps(s.md) if s.md else "",
             })
+        # References (local project fiducials) appear in the same list, flagged ref=✓.
+        for r in self.project.references:
+            self._spine_rows.append(("ref", r.id))
+            rows.append({
+                "name": r.name,
+                "holder": "",
+                "x": r.x, "y": r.y, "z": r.z,
+                "incidence": "",
+                "scan": False,
+                "ref": True,
+                "active": "",
+                "md": "",
+            })
         return pd.DataFrame(
-            rows, columns=["name", "holder", "x", "y", "z", "incidence", "active", "md"])
+            rows, columns=["name", "holder", "x", "y", "z", "incidence",
+                           "scan", "ref", "active", "md"])
+
+    def _scan_ticked_names(self) -> set:
+        """Names of samples currently ticked as scan targets (held by the microscope engine)."""
+        if self.micro is None:
+            return set()
+        try:
+            return {b.name for b in self.micro.interactive.get_scan_targets()}
+        except Exception:
+            return set()
+
 
     def refresh_spine(self):
         self.spine.value = self._spine_df()
@@ -345,21 +395,38 @@ class AcquireApp:
                 **{h.name: h.id for h in self.store.list_holders()}}
 
     def _selected_indices(self):
-        """The selected spine rows (sorted), clamped to valid sample ids."""
-        sel = sorted(int(i) for i in (self.spine.selection or []) if 0 <= int(i) < len(self._spine_ids))
-        return sel
+        """The selected master-list rows (sorted), clamped to valid rows."""
+        return sorted(int(i) for i in (self.spine.selection or [])
+                      if 0 <= int(i) < len(self._spine_rows))
+
+    def _selected_rows(self):
+        """The selected rows as typed ``(kind, id)`` pairs (``"sample"`` / ``"ref"``)."""
+        return [self._spine_rows[i] for i in self._selected_indices()]
 
     def _selected_samples(self):
-        """All selected samples (multi-select via checkbox + ctrl/shift)."""
-        return [self.store.sample_by_id(self._spine_ids[i]) for i in self._selected_indices()
-                if self.store.sample_by_id(self._spine_ids[i]) is not None]
+        """All selected *store samples* (reference rows are skipped)."""
+        out = []
+        for kind, rid in self._selected_rows():
+            if kind != "sample":
+                continue
+            s = self.store.sample_by_id(rid)
+            if s is not None:
+                out.append(s)
+        return out
 
     def _selected_sample(self):
-        """The single (first) selected sample -- for the detail panel / single-target actions."""
-        idx = self._selected_indices()
-        if not idx:
-            return None
-        return self.store.sample_by_id(self._spine_ids[idx[0]])
+        """The single (first) selected store sample -- single-target actions / detail panel."""
+        for kind, rid in self._selected_rows():
+            if kind == "sample":
+                return self.store.sample_by_id(rid)
+        return None
+
+    def _selected_reference(self):
+        """The single (first) selected project reference, or None."""
+        for kind, rid in self._selected_rows():
+            if kind == "ref":
+                return next((r for r in self.project.references if r.id == rid), None)
+        return None
 
     # Position-field display: label + units (piezo µm, Huber mm/deg).
     _POS_FIELDS = [
@@ -386,19 +453,33 @@ class AcquireApp:
         return " · ".join(bits) if bits else "_(no axes set)_"
 
     def _refresh_sample_detail(self):
-        """Surface the full captured position (all axes) of the selected sample."""
+        """Surface the full captured position (all axes) of the selected sample/reference."""
         if not hasattr(self, "sample_detail"):
             return
-        sel = self._selected_samples()
-        if not sel:
-            self.sample_detail.object = "_select a sample to see its full position_"
+        rows = self._selected_rows()
+        if not rows:
+            self.sample_detail.object = "_select a row to see its full position_"
             return
-        if len(sel) > 1:
+        samples = self._selected_samples()
+        if len(rows) > 1:
             self.sample_detail.object = (
-                "**{} samples selected** — remove / move to holder act on all; "
-                "load uses the first.".format(len(sel)))
+                "**{} rows selected** — remove / move to holder act on all samples; "
+                "load / go to use the first.".format(len(rows)))
             return
-        s = sel[0]
+        kind, rid = rows[0]
+        if kind == "ref":
+            r = next((r for r in self.project.references if r.id == rid), None)
+            if r is None:
+                self.sample_detail.object = "_reference not found_"
+                return
+            self.sample_detail.object = (
+                "**{}** — reference landmark  \nx {} · y {} · z {}".format(
+                    r.name, r.x, r.y, r.z))
+            return
+        if not samples:
+            self.sample_detail.object = "_select a row to see its full position_"
+            return
+        s = samples[0]
         lines = [f"**{s.name}** — full captured position",
                  "nominal: " + self._fmt_position(s.nominal)]
         if s.refined is not None:
@@ -409,9 +490,26 @@ class AcquireApp:
         i = int(getattr(event, "row", -1))
         col = getattr(event, "column", None)
         val = getattr(event, "value", None)
-        if not (0 <= i < len(self._spine_ids)):
+        if not (0 <= i < len(self._spine_rows)):
             return
-        s = self.store.sample_by_id(self._spine_ids[i])
+        kind, rid = self._spine_rows[i]
+
+        # The "scan" tick is per-session state held by the microscope engine, and only
+        # applies to real samples (references are never scan targets).
+        if col == "scan":
+            if kind == "sample":
+                s = self.store.sample_by_id(rid)
+                self._set_sample_scan(s.name if s is not None else None, bool(val))
+            # Re-render either way so a stray tick on a reference row is reset.
+            self.refresh_spine()
+            return
+
+        if kind == "ref":
+            self._edit_reference(rid, col, val)
+            self.refresh_spine()
+            return
+
+        s = self.store.sample_by_id(rid)
         if s is None:
             return
         if col == "name":
@@ -435,20 +533,60 @@ class AcquireApp:
                 _toast("metadata must be JSON", "warning")
         self.refresh_spine()
 
+    def _edit_reference(self, ref_id, col, val):
+        """Apply an inline edit to a reference row (only its name is editable here)."""
+        r = next((r for r in self.project.references if r.id == ref_id), None)
+        if r is None:
+            return
+        if col == "name":
+            r.name = str(val).strip() or r.name
+
+    def _set_sample_scan(self, name, enabled):
+        """Toggle one sample's scan-target membership in the microscope engine."""
+        if self.micro is None or not name:
+            return
+        inter = self.micro.interactive
+        try:
+            current = {b.name for b in inter.get_scan_targets()}
+        except Exception:
+            current = set()
+        if enabled:
+            current.add(name)
+        else:
+            current.discard(name)
+        try:
+            inter.set_scan_selection(current)
+        except Exception:
+            pass
+
+
     def _on_add_blank(self, _e):
         self.store.add_sample(self._next_name())
         self.refresh_spine()
 
     def _on_remove_selected(self, _e):
-        samples = self._selected_samples()
-        if not samples:
-            _toast("select one or more samples (checkboxes / ctrl+click)", "warning")
+        rows = self._selected_rows()
+        if not rows:
+            _toast("select one or more rows (checkboxes / ctrl+click)", "warning")
             return
-        for s in samples:
-            self.store.delete_sample(s.id)
+        n_samples = n_refs = 0
+        ref_ids = {rid for kind, rid in rows if kind == "ref"}
+        for kind, rid in rows:
+            if kind == "sample":
+                self.store.delete_sample(rid)
+                n_samples += 1
+        if ref_ids:
+            self.project.references = [
+                r for r in self.project.references if r.id not in ref_ids]
+            n_refs = len(ref_ids)
         self.spine.selection = []
         self.refresh_spine()
-        _toast("removed {} sample(s)".format(len(samples)))
+        bits = []
+        if n_samples:
+            bits.append("{} sample(s)".format(n_samples))
+        if n_refs:
+            bits.append("{} reference(s)".format(n_refs))
+        _toast("removed " + " + ".join(bits))
 
     def _on_set_active(self, _e):
         s = self._selected_sample()
@@ -458,6 +596,31 @@ class AcquireApp:
         self.store.set_active_sample(s.id)
         self.refresh_spine()
         _toast("active sample set to intent — load '{}' from beamline session".format(s.name))
+
+    def _on_goto_selected(self, _e):
+        """Move the stage to the selected master-list row (sample or reference)."""
+        if self.micro is None:
+            _toast("open the Align & Samples tab first (the microscope must be running)",
+                   "warning")
+            return
+        rows = self._selected_rows()
+        if not rows:
+            _toast("select a row to move to", "warning")
+            return
+        kind, rid = rows[0]
+        if kind == "sample":
+            s = self.store.sample_by_id(rid)
+            xyz = self._sample_xyz(s) if s is not None else None
+            label = s.name if s is not None else "?"
+        else:
+            r = next((r for r in self.project.references if r.id == rid), None)
+            xyz = (r.x or 0.0, r.y or 0.0, r.z or 0.0) if r is not None else None
+            label = r.name if r is not None else "?"
+        if xyz is None:
+            _toast("'{}' has no recorded position to move to".format(label), "warning")
+            return
+        self.micro.interactive.goto_xyz(*xyz)
+        _toast("moving to '{}'".format(label))
 
     def _next_name(self):
         existing = {s.name for s in self.store.list_samples()}
@@ -568,15 +731,16 @@ class AcquireApp:
             name="onto holder", options=self._holder_options(), width=160)
         new_btn = pn.widgets.Button(name="★ new sample here", button_type="primary", width=160)
         new_btn.on_click(self._on_new_here)
-        assign_btn = pn.widgets.Button(name="assign → selected", width=160)
+        assign_btn = pn.widgets.Button(name="assign → selected sample", width=180)
         assign_btn.on_click(self._on_assign_here)
         ref_btn = pn.widgets.Button(name="+ reference here", width=160)
         ref_btn.on_click(self._on_ref_here)
         sync_btn = pn.widgets.Button(name="↻ markers from samples", width=180)
         sync_btn.on_click(lambda _e: self.sync_markers())
 
-        # Capture-position controls. These are folded into the microscope's **Move** tab
-        # (next to the bookmark list) once the microscope is built — see _ensure_microscope.
+        # Capture-position controls. These are folded into the microscope's **Move** tab once
+        # the microscope is built (see _ensure_microscope). Every "sample" they refer to is a
+        # row in the one master **Sample list** in the sidebar — there is no second list.
         self.capture_controls = pn.Column(
             pn.pane.Markdown("### Capture position\nMove with the image, then:"),
             self.interlock_banner,
@@ -586,9 +750,11 @@ class AcquireApp:
             pn.Row(new_btn, assign_btn),
             pn.Row(ref_btn, sync_btn),
             pn.pane.Markdown(
-                "<span style='color:#777;font-size:12px'>Positioned samples show as "
-                "lime markers; visible references as yellow. Use the **Scan** tabs for line/grid/"
-                "polygon alignment.</span>"),
+                "<span style='color:#777;font-size:12px'><b>new sample here</b> adds a row to the "
+                "Sample list at the current position; <b>assign → selected sample</b> writes this "
+                "position onto the row selected in that list. Positioned samples show as lime "
+                "markers, references as yellow. Use the <b>Scan</b> tabs for line/grid/polygon "
+                "alignment.</span>"),
             sizing_mode="stretch_width",
         )
         self.home = self.micro_box
@@ -612,8 +778,8 @@ class AcquireApp:
             from smi_acquire.microscope.builder import build_microscope
             ui = build_microscope(executor=self.executor, interlock=self.interlock)
             self.micro = ui
-            # Fold the capture-position controls into the microscope's Move tab (combined
-            # with the bookmark list — they were redundant as a separate panel).
+            # Fold the capture-position controls into the microscope's Move tab. The single
+            # sample list is the sidebar master list; the engine renders markers headlessly.
             ui.capture_slot.append(self.capture_controls)
             ui.attach_periodic_callbacks()
             pn.state.add_periodic_callback(self._refresh_pos, period=500)

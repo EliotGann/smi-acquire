@@ -116,9 +116,9 @@ class LinearScanMode:
         self.panel = pn.Column(
             pn.pane.Markdown("### Linear scan"),
             pn.pane.Markdown(
-                "Pick a distance, step, and direction. Tick **scan** on bookmarks in the "
-                "**Bookmarks** list to place a line on each, and/or turn on **Add point** and "
-                "click the image to drop new spots. Enable the overlay with the **Linear** "
+                "Pick a distance, step, and direction. Tick **scan** on samples in the "
+                "**Sample list** (sidebar) to place a line on each, and/or turn on **Add point** "
+                "and click the image to drop new spots. Enable the overlay with the **Linear** "
                 "toggle in the Quick scripts panel."
             ),
             pn.Row(self._distance, self._step, self._direction),

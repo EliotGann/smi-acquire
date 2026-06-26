@@ -123,8 +123,8 @@ class SquareScanMode:
         self.panel = pn.Column(
             pn.pane.Markdown("### Square (rectangle) scan"),
             pn.pane.Markdown(
-                "Pick a width, height, and per-axis step. Tick **scan** on bookmarks in the "
-                "**Bookmarks** list to place the rectangle on each, and/or turn on **Add "
+                "Pick a width, height, and per-axis step. Tick **scan** on samples in the "
+                "**Sample list** (sidebar) to place the rectangle on each, and/or turn on **Add "
                 "point** and click the image to drop new spots. Enable the overlay with the "
                 "**Square** toggle in the Quick scripts panel."
             ),

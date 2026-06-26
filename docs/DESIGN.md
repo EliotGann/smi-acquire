@@ -82,11 +82,13 @@ points the microscope at the fake IOC by default.
 
 `swaxs-beam-image`'s package is vendored under `microscope/` (its `app.py`/`__main__.py`
 dropped). `microscope/builder.py` re-assembles it as an **embeddable component** —
-`build_microscope()` returns the layout plus the live `InteractiveMode` bookmark store, so the
-host app harvests bookmark `(x, y, z)` positions into `spec.samples.rows` (mapping onto
-`{motor_object}_x/y/z`). Its own modes (click-to-move, bookmarks, square/polygon/line grids,
-focus, calibrate) are unchanged and still emit their own microfocus/alignment snippets via the
-color-coded script panel.
+`build_microscope()` returns the layout plus the live `InteractiveMode`. The microscope owns no
+sample list of its own: the host's redis-backed **Sample list** (the sidebar spine) is the one
+source of truth, and the host pushes its samples + references into `InteractiveMode.set_samples()`,
+which renders the on-image markers and exposes the per-sample `in_scan` flags the Scan tabs
+replicate onto. Its modes (click-to-move, square/polygon/line grids, focus, calibrate) are
+otherwise unchanged and still emit their own microfocus/alignment snippets via the color-coded
+script panel.
 
 ## Framework choice
 

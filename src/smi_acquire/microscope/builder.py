@@ -248,16 +248,15 @@ def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=N
     scan_tabs = pn.Tabs((square.name, square.panel), (polygon.name, polygon.panel),
                         (linear.name, linear.panel), dynamic=False)
 
-    # The **Move** tab folds three things that were redundant/scattered into one place:
+    # The **Move** tab folds the two things the operator needs side-by-side:
     #   1. ``capture_slot`` — filled by the host app with its capture-position controls
     #      (live position, name field, "new sample here" / "assign" / "reference").
-    #   2. the single shared bookmark list (the only bookmark display).
-    #   3. the click-to-move preview controls.
+    #   2. the click-to-move preview controls.
+    # The sample list itself is the host app's single master "Sample list" sidebar — there is
+    # no separate bookmark list here anymore (it was a confusing second source of truth).
     capture_slot = pn.Column(sizing_mode="stretch_width")
     move_tab = pn.Column(
         capture_slot,
-        pn.layout.Divider(),
-        interactive.bookmark_panel,
         pn.layout.Divider(),
         interactive.move_panel,
         sizing_mode="stretch_width",
