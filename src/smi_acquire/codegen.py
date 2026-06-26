@@ -141,6 +141,20 @@ def _energy_values_src(axis: AxisSpec) -> str:
     return _numlist(axis.values())
 
 
+def _list_values_src(axis: AxisSpec, kind: str, named_lists: bool) -> str:
+    """Source for a list-bearing axis's values: a ``resolve_list`` reference, or a literal.
+
+    Redis-first: when the axis is tagged with a saved ``list_name`` (and ``named_lists`` is True,
+    i.e. the copy-paste script), reference the shared store by name — ``resolve_list("Name",
+    kind=…, store=lists)`` (the script opens ``lists`` once; see :func:`render`).  Otherwise (an
+    un-named axis, or the store-free dry-run) emit the literal expanded values.
+    """
+    name = axis.params.get("list_name") if named_lists else None
+    if name:
+        return "resolve_list({!r}, kind=\"{}\", store=lists)".format(name, kind)
+    return _numlist(axis.values())
+
+
 def _render_axis(axis: AxisSpec, *, aligned: bool = False, named_lists: bool = True) -> str:
     """Return the source for one axis: an expression, or ``*expr`` for spatial (a list).
 
@@ -148,9 +162,10 @@ def _render_axis(axis: AxisSpec, *, aligned: bool = False, named_lists: bool = T
     aligned zero (``th0=None``, relative) rather than a pre-read ``piezo.th.position`` (which,
     in ``acquire_bar``, ``axes_for`` reads BEFORE the align hook -> the nominal, not aligned, th).
 
-    ``named_lists`` (True for the copy-paste script) emits ``resolve_list(name, ...)`` for a named
-    energy list; False (the dry-run) forces the literal expanded values, so the dry-run is
-    store-free and faithful to the values the GUI is holding.
+    ``named_lists`` (True for the copy-paste script) emits ``resolve_list(name, kind=…, store=lists)``
+    for any list-bearing axis (energy / incidence / temperature) tagged with a saved ``list_name``;
+    False (the dry-run) forces the literal expanded values, so the dry-run is store-free and
+    faithful to the values the GUI is holding.
     """
     t = axis.type
     p = axis.params
@@ -158,24 +173,21 @@ def _render_axis(axis: AxisSpec, *, aligned: bool = False, named_lists: bool = T
         extra = ""
         if p.get("flux_reseek"):
             extra = ", flux_signal=xbpm2.sumX, flux_threshold=50"
-        # Redis-first: a named energy list references the shared store by name (no copy-paste);
-        # an unnamed axis (or a dry-run) falls back to the literal expanded eV list. resolve_list
-        # needs the store, so the generated script opens one (``lists``) -- see render().
-        name = p.get("list_name") if named_lists else None
-        vsrc = ("resolve_list({!r}, kind=\"energy\", store=lists)".format(name) if name
-                else _energy_values_src(axis))
+        vsrc = _list_values_src(axis, "energy", named_lists)
         return "energy_axis({}, settle={}{})".format(
             vsrc, _num(p.get("settle", 2.0)), extra)
     if t == "temperature":
         kw = ", soak={}".format(_num(p.get("soak", 60.0)))
         if p.get("first_soak") is not None:
             kw += ", first_soak={}".format(_num(p["first_soak"]))
-        return "temperature_axis(heater, {}{})".format(_numlist(axis.values()), kw)
+        return "temperature_axis(heater, {}{})".format(
+            _list_values_src(axis, "temperature", named_lists), kw)
     if t == "incidence":
         # Aligned: anchor to the aligned zero (th0=None -> relative). Unaligned: anchor to the
         # current theta read at run time. The recorded `incident_angle` is the true relative angle.
         th0 = "None" if aligned else "th0"
-        return "incidence_axis(piezo.th, {}, {})".format(th0, _numlist(axis.values()))
+        return "incidence_axis(piezo.th, {}, {})".format(
+            th0, _list_values_src(axis, "incidence", named_lists))
     if t == "motor":
         name = p.get("name", "motor")
         device = p.get("device", "waxs.arc")   # the WAXS arc is waxs.arc, NOT waxs
@@ -247,6 +259,10 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
     ap = spec.apparatus
     multi = len(spec.samples.rows) != 1
     builder = "acquire_bar" if multi else "acquire"
+    # A temperature axis references `heater`; default it to linkam if none was configured, so the
+    # script is always valid even when the heater wasn't picked explicitly.
+    has_temperature = any(a.type == "temperature" for a in spec.axes)
+    heater_kind = ap.heater or ("linkam" if has_temperature else None)
 
     # ---- decide what the body needs, so imports are exact -----------------
     # Alignment is a PRE-run hook (it opens its own runs + stages detectors): it MUST go to
@@ -301,20 +317,21 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
         L.append("from smi_plans import load_holder")
     else:
         L.append("from smi_plans import SampleList")
-    # Redis-first: a named energy list resolves from the shared store by name. resolve_list
-    # requires the store, so open one in the script and pass it (mirrors load_holder's seam).
-    # Skipped under for_dryrun (values are inlined for a store-free dry-run).
+    # Redis-first: a named list (energy/incidence/temperature) resolves from the shared store by
+    # name. resolve_list requires the store, so open one in the script and pass it (mirrors
+    # load_holder's seam). Skipped under for_dryrun (values are inlined for a store-free dry-run).
+    _LIST_KINDS = ("energy", "incidence", "temperature")
     needs_resolve_list = named_lists and any(
-        a.type == "energy" and a.params.get("list_name") for a in spec.axes)
+        a.type in _LIST_KINDS and a.params.get("list_name") for a in spec.axes)
     if needs_resolve_list:
         L.append("from smi_plans import resolve_list, ListStore")
     if needs_bps:
         L.append("import bluesky.plan_stubs as bps")
     if needs_signal:
         L.append("from ophyd import Signal")
-    if spec.apparatus.heater:
+    if heater_kind:
         L.append("from smi_plans.technique_C_temperature import {}".format(
-            "linkam_heater" if spec.apparatus.heater == "linkam" else "lakeshore_heater"))
+            "linkam_heater" if heater_kind == "linkam" else "lakeshore_heater"))
     L.append("")
 
     # ---- sample bar -------------------------------------------------------
@@ -327,7 +344,7 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
     else:
         L.append("dets = [{}]".format(", ".join(spec.beam.detectors)))
     L.append("reads = [{}]".format(", ".join(spec.beam.reads)))
-    heater_call = heater_identifier(spec.apparatus.heater)
+    heater_call = heater_identifier(heater_kind)
     if heater_call:
         L.append("heater = {}".format(heater_call))
     # Open the named-list store once if any axis references a list by name.

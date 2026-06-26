@@ -35,6 +35,7 @@ from smi_acquire.store import AcquireStore
 from smi_acquire.lists import AcquireListStore
 from smi_acquire.execute import LocalExecutor, QueueServerExecutor, InterlockedError
 from smi_acquire.interlock import Interlock
+from smi_acquire.proposal import Proposal
 
 pn.extension("tabulator", "codeeditor", sizing_mode="stretch_width", notifications=True)
 
@@ -156,6 +157,7 @@ class AcquireApp:
         # Motion seam: jog directly via ophyd (interlock-gated); submit = copy-paste to the
         # beamline RunEngine.  The interlock reads the external RE-busy flag (db=3, read-only).
         self.interlock = Interlock.from_redis()
+        self.proposal = Proposal.from_redis()      # read-only proposal/data-session for display
         self.executor = LocalExecutor(interlock=self.interlock)
         self.micro = None                 # MicroscopeUI (lazy: needs the IOC)
         self.current_exp: Experiment | None = None
@@ -295,6 +297,8 @@ class AcquireApp:
 
         self.store_status = pn.pane.Markdown("")
         self._refresh_store_status()
+        self.proposal_status = pn.pane.Markdown("")
+        self._refresh_proposal_status()
         self.spine_count = pn.pane.Markdown("")
         self._refresh_spine_count()
         # Full captured position of the selected sample (all piezo_* + stage_* axes).
@@ -303,6 +307,7 @@ class AcquireApp:
         self.spine_panel = pn.Column(
             pn.pane.Markdown("### Sample list"),
             self.store_status,
+            self.proposal_status,
             self.spine_count,
             self.spine,
             pn.Row(add, rm),
@@ -443,6 +448,23 @@ class AcquireApp:
         else:
             self.store_status.object = ("<span style='color:#b26a00'>○ {}</span>"
                                         .format(self.store.location))
+
+    def _refresh_proposal_status(self):
+        """Show the proposal/data-session read-only (it is set in the beamline session, not here)."""
+        prop = None
+        try:
+            prop = self.proposal.current()
+        except Exception:
+            prop = None
+        if prop:
+            self.proposal_status.object = (
+                "<span style='color:#37474F'>proposal: <b>{}</b> "
+                "<span style='color:#999;font-size:11px'>(read-only; set in the beamline "
+                "session)</span></span>".format(prop))
+        else:
+            self.proposal_status.object = (
+                "<span style='color:#999;font-size:12px'>proposal: — (set in the beamline "
+                "session; project_name travels per sample)</span>")
 
     def _refresh_spine_count(self):
         samples = self.store.list_samples()
@@ -958,6 +980,8 @@ class AcquireApp:
             pn.state.add_periodic_callback(self._refresh_pos, period=500)
             # Poll the RE-busy interlock at ~1.5 Hz (uncached; the flag has a 30s TTL).
             pn.state.add_periodic_callback(self._refresh_interlock, period=650)
+            # Refresh the read-only proposal occasionally (changes when staff set a new proposal).
+            pn.state.add_periodic_callback(self._refresh_proposal_status, period=5000)
             self.micro_box.clear()
             self.micro_box.append(ui.layout)
             self.sync_markers()
@@ -1275,6 +1299,8 @@ class AcquireApp:
             fields.append(self._energy_fields(i, ax))
             for f in axis_param_schema(ax.type):
                 fields.append(self._param_widget(ax, f, None, self._render_wizard))
+        elif ax.type == "temperature":
+            fields.append(self._temperature_fields(i, ax))
         else:
             for f in axis_param_schema(ax.type):
                 fields.append(self._param_widget(ax, f, None, self._render_wizard))
@@ -1339,7 +1365,10 @@ class AcquireApp:
                 value=_fmt_floatlist(ax.params.get("values") or []))
             vals.param.watch(lambda e, idx=i: self._incidence_set_list(idx, e.new), "value")
             body.append(vals)
-        return pn.Column(pn.Row(pn.pane.HTML("<b>Incident angles</b>"), sel), body)
+        return pn.Column(
+            pn.Row(pn.pane.HTML("<b>Incident angles</b>"), sel), body,
+            self._named_list_row(i, ax, "incidence", save_fn=self._incidence_save_list,
+                                 open_fn=self._incidence_open_list, label="angle"))
 
     def _incidence_set_mode(self, i, mode):
         st = self.wizard
@@ -1367,6 +1396,7 @@ class AcquireApp:
         if 0 <= i < len(st.axes):
             st.axes[i].params["range"] = [float(start), float(stop), float(step)]
             st.axes[i].params.pop("values", None)
+            st.axes[i].params.pop("list_name", None)   # edited -> detach from any saved list
         self._render_wizard()
 
     def _incidence_set_list(self, i, text):
@@ -1374,7 +1404,247 @@ class AcquireApp:
         if 0 <= i < len(st.axes):
             st.axes[i].params["values"] = _parse_floatlist(text)
             st.axes[i].params.pop("range", None)
+            st.axes[i].params.pop("list_name", None)   # edited -> detach from any saved list
         self._render_wizard()
+
+    def _incidence_save_list(self, i, name):
+        """Persist the current incident-angle set as a NamedList(kind='incidence') in db=2."""
+        name = (name or "").strip()
+        st = self.wizard
+        if not (0 <= i < len(st.axes)):
+            return
+        if not name:
+            _toast("type a name for the angle list first", "warning")
+            return
+        if self.listdb is None:
+            _toast("no list store connected", "error")
+            return
+        ax = st.axes[i]
+        values = list(ax.values())
+        rng = ax.params.get("range")
+        spec = {"range": [float(v) for v in rng]} if (rng and len(rng) == 3) else \
+               {"values": list(values)}
+        try:
+            self.listdb.save_list(name, "incidence", values, spec=spec, units="deg")
+        except Exception as exc:  # noqa: BLE001
+            _toast("save failed: {}".format(exc), "error")
+            return
+        ax.params["list_name"] = name
+        self._render_wizard()
+        _toast("saved angle list '{}' ({} angles)".format(name, len(values)))
+
+    def _incidence_open_list(self, i, name):
+        """Load a stored incidence NamedList back into the editor (range or explicit values)."""
+        if not name or name == "(load saved…)":
+            return
+        st = self.wizard
+        if not (0 <= i < len(st.axes)) or self.listdb is None:
+            return
+        nl = self.listdb.get_list(name, "incidence")
+        if nl is None:
+            _toast("angle list '{}' not found".format(name), "warning")
+            return
+        ax = st.axes[i]
+        spec = nl.spec or {}
+        if spec.get("range") and len(spec["range"]) == 3:
+            ax.params["range"] = [float(v) for v in spec["range"]]
+            ax.params.pop("values", None)
+        else:
+            ax.params["values"] = [float(v) for v in (spec.get("values") or nl.values or [])]
+            ax.params.pop("range", None)
+        ax.params["list_name"] = name
+        self._render_wizard()
+        _toast("opened angle list '{}'".format(name))
+
+    # ---- temperature: setpoints + ramp/hold/cycle editor ----------------
+    @staticmethod
+    def _temperature_mode(ax):
+        """'ramp' if the axis carries a [start,stop,step] range, else 'list'."""
+        rng = ax.params.get("range")
+        return "ramp" if (rng and len(rng) == 3) else "list"
+
+    def _temperature_fields(self, i, ax):
+        """A graphical temperature editor: setpoints (explicit list OR a start/stop/step ramp),
+        an anneal-then-cool ``cycle`` toggle, per-setpoint hold (soak) + first-point soak, and an
+        advisory ramp rate (stored for the user; the heater owns the actual rate). The materialized
+        setpoint list + this recipe persist as a reusable ``NamedList(kind="temperature")``."""
+        mode = self._temperature_mode(ax)
+        sel = pn.widgets.RadioButtonGroup(
+            name="Setpoints", options=["list", "ramp"], value=mode, width=160)
+        sel.param.watch(lambda e, idx=i: self._temperature_set_mode(idx, e.new), "value")
+        body = pn.Column()
+        if mode == "ramp":
+            rng = list(ax.params.get("range") or [30.0, 120.0, 10.0])
+            start = pn.widgets.FloatInput(name="start (°C)", value=float(rng[0]), step=1.0, width=110)
+            stop = pn.widgets.FloatInput(name="stop (°C)", value=float(rng[1]), step=1.0, width=110)
+            step = pn.widgets.FloatInput(name="step (°C)", value=float(rng[2]), step=1.0, width=110)
+
+            def _apply(_e, idx=i, s=start, e2=stop, st=step):
+                self._temperature_set_range(idx, s.value, e2.value, st.value)
+            for w in (start, stop, step):
+                w.param.watch(_apply, "value")
+            body.append(pn.Row(start, stop, step))
+        else:
+            vals = pn.widgets.TextInput(
+                name="Setpoints (°C)", value=_fmt_floatlist(ax.params.get("values") or []),
+                width=340)
+            vals.param.watch(lambda e, idx=i: self._temperature_set_list(idx, e.new), "value")
+            body.append(vals)
+
+        cycle = pn.widgets.Checkbox(
+            name="↩ cycle (anneal then cool: up to the top, back to the start — doubles the scan)",
+            value=bool(ax.params.get("cycle")))
+        cycle.param.watch(lambda e, idx=i: self._temperature_set_flag(idx, "cycle", e.new), "value")
+
+        soak = pn.widgets.FloatInput(name="hold at each (s)", value=float(ax.params.get("soak", 120.0)),
+                                     step=10.0, start=0.0, width=140)
+        soak.param.watch(lambda e, idx=i: self._temperature_set_param(idx, "soak", e.new), "value")
+        first = pn.widgets.FloatInput(name="first-point hold (s)",
+                                      value=float(ax.params.get("first_soak", 300.0)),
+                                      step=10.0, start=0.0, width=150)
+        first.param.watch(lambda e, idx=i: self._temperature_set_param(idx, "first_soak", e.new),
+                          "value")
+        # Advisory ramp rate (heater owns the real rate; we keep it as md for the user + future use).
+        ramp = pn.widgets.FloatInput(name="ramp rate (°C/min, advisory)",
+                                     value=float(ax.params.get("ramp_rate", 10.0)),
+                                     step=1.0, start=0.0, width=190)
+        ramp.param.watch(lambda e, idx=i: self._temperature_set_param(idx, "ramp_rate", e.new),
+                         "value")
+
+        pts = ax.values()
+        total = len(pts)
+        cyc = " · ↑↓ cycle" if ax.params.get("cycle") else ""
+        count = pn.pane.HTML(
+            "<b>{} setpoint(s)</b>{} &nbsp;<span style='color:#777'>{}</span>".format(
+                total, cyc, ", ".join("{:g}".format(v) for v in pts[:12])
+                + (" …" if total > 12 else "")))
+        return pn.Column(
+            pn.Row(pn.pane.HTML("<b>Temperature</b>"), sel), body, count,
+            pn.Row(soak, first), pn.Row(ramp), cycle,
+            self._named_list_row(i, ax, "temperature", save_fn=self._temperature_save_list,
+                                 open_fn=self._temperature_open_list, label="temperature"))
+
+    def _temperature_set_mode(self, i, mode):
+        st = self.wizard
+        if not (0 <= i < len(st.axes)):
+            return
+        ax = st.axes[i]
+        if mode == "ramp":
+            cur = ax.values()
+            if len(cur) >= 2:
+                start, stop = cur[0], cur[-1]
+                step = round((stop - start) / (len(cur) - 1), 4) or 10.0
+            else:
+                start, stop, step = 30.0, 120.0, 10.0
+            ax.params["range"] = [start, stop, step]
+            ax.params.pop("values", None)
+        else:
+            ax.params["values"] = ax.values()
+            ax.params.pop("range", None)
+        ax.params.pop("list_name", None)
+        self._render_wizard()
+
+    def _temperature_set_range(self, i, start, stop, step):
+        st = self.wizard
+        if 0 <= i < len(st.axes):
+            st.axes[i].params["range"] = [float(start), float(stop), float(step)]
+            st.axes[i].params.pop("values", None)
+            st.axes[i].params.pop("list_name", None)
+        self._render_wizard()
+
+    def _temperature_set_list(self, i, text):
+        st = self.wizard
+        if 0 <= i < len(st.axes):
+            st.axes[i].params["values"] = _parse_floatlist(text)
+            st.axes[i].params.pop("range", None)
+            st.axes[i].params.pop("list_name", None)
+        self._render_wizard()
+
+    def _temperature_set_flag(self, i, key, on):
+        st = self.wizard
+        if 0 <= i < len(st.axes):
+            if on:
+                st.axes[i].params[key] = True
+            else:
+                st.axes[i].params.pop(key, None)
+            st.axes[i].params.pop("list_name", None)
+        self._render_wizard()
+
+    def _temperature_set_param(self, i, key, value):
+        st = self.wizard
+        if 0 <= i < len(st.axes):
+            try:
+                st.axes[i].params[key] = float(value)
+            except (TypeError, ValueError):
+                return
+            # soak/first_soak/ramp_rate are run params, not the value list -> don't detach the name
+        self._render_wizard()
+
+    def _temperature_save_list(self, i, name):
+        """Persist the current setpoints as a NamedList(kind='temperature').
+
+        Stores the materialized setpoint ``values`` (post-cycle, what the plan resolves), an
+        editable ``spec`` (``{values|range, cycle}``), and ``md`` extras (ramp_rate, soak,
+        first_soak) used for nice interactions / future backend re-materialization.
+        """
+        name = (name or "").strip()
+        st = self.wizard
+        if not (0 <= i < len(st.axes)):
+            return
+        if not name:
+            _toast("type a name for the temperature list first", "warning")
+            return
+        if self.listdb is None:
+            _toast("no list store connected", "error")
+            return
+        ax = st.axes[i]
+        values = list(ax.values())
+        rng = ax.params.get("range")
+        spec = {"cycle": bool(ax.params.get("cycle"))}
+        if rng and len(rng) == 3:
+            spec["range"] = [float(v) for v in rng]
+        else:
+            spec["values"] = [float(v) for v in (ax.params.get("values") or [])]
+        md = {k: float(ax.params[k]) for k in ("ramp_rate", "soak", "first_soak")
+              if ax.params.get(k) is not None}
+        try:
+            self.listdb.save_list(name, "temperature", values, spec=spec, units="C", md=md)
+        except Exception as exc:  # noqa: BLE001
+            _toast("save failed: {}".format(exc), "error")
+            return
+        ax.params["list_name"] = name
+        self._render_wizard()
+        _toast("saved temperature list '{}' ({} setpoints)".format(name, len(values)))
+
+    def _temperature_open_list(self, i, name):
+        """Load a stored temperature NamedList back into the editor (setpoints + ramp/hold/cycle)."""
+        if not name or name == "(load saved…)":
+            return
+        st = self.wizard
+        if not (0 <= i < len(st.axes)) or self.listdb is None:
+            return
+        nl = self.listdb.get_list(name, "temperature")
+        if nl is None:
+            _toast("temperature list '{}' not found".format(name), "warning")
+            return
+        ax = st.axes[i]
+        spec = nl.spec or {}
+        if spec.get("range") and len(spec["range"]) == 3:
+            ax.params["range"] = [float(v) for v in spec["range"]]
+            ax.params.pop("values", None)
+        else:
+            ax.params["values"] = [float(v) for v in (spec.get("values") or nl.values or [])]
+            ax.params.pop("range", None)
+        if spec.get("cycle"):
+            ax.params["cycle"] = True
+        else:
+            ax.params.pop("cycle", None)
+        for k in ("ramp_rate", "soak", "first_soak"):
+            if (nl.md or {}).get(k) is not None:
+                ax.params[k] = float(nl.md[k])
+        ax.params["list_name"] = name
+        self._render_wizard()
+        _toast("opened temperature list '{}'".format(name))
 
     # ---- energy: visual boundaries+density editor --------------------
     @staticmethod
@@ -1441,30 +1711,27 @@ class AcquireApp:
             plot, count, rows, add, updown,
             self._energy_named_list_row(i, ax))
 
-    def _energy_named_list_row(self, i, ax):
-        """Name / save / open controls so an energy region set becomes a reusable NamedList.
+    def _named_list_row(self, i, ax, kind, *, save_fn, open_fn, label):
+        """Reusable 'name this list / open a saved one' controls for a list-bearing axis.
 
-        Saving writes a ``NamedList(kind="energy")`` to the shared db=2 list store: the
-        authoritative materialized ``values`` (what the plan resolves), the ``{boundaries, steps,
-        updown}`` ``spec`` (so the graphical editor can re-open and edit it), and ``md`` extras
-        (flux re-seek threshold) used only for nice interactions. Opening loads one back into this
-        editor. When a list is named, the generated script references it by name via
-        ``resolve_list(...)`` instead of pasting the eV list.
+        Shared by the per-kind editors (energy / incidence / temperature). ``save_fn(idx, name)``
+        persists the current axis as a ``NamedList(kind=…)``; ``open_fn(idx, name)`` loads one back.
+        When ``ax.params['list_name']`` is set, codegen references it by name via ``resolve_list``.
         """
         name_in = pn.widgets.TextInput(
-            placeholder="name this energy list…", width=200,
+            placeholder="name this {} list…".format(label), width=200,
             value=str(ax.params.get("list_name") or ""))
         save = pn.widgets.Button(name="⤓ save list", width=110, button_type="primary",
                                  disabled=self.listdb is None)
-        save.on_click(lambda _e, idx=i, w=name_in: self._energy_save_list(idx, w.value))
-        opts = ["(load saved…)"] + (self.listdb.list_names("energy") if self.listdb else [])
+        save.on_click(lambda _e, idx=i, w=name_in: save_fn(idx, w.value))
+        opts = ["(load saved…)"] + (self.listdb.list_names(kind) if self.listdb else [])
         open_sel = pn.widgets.Select(options=opts, width=180, value="(load saved…)")
-        open_sel.param.watch(lambda e, idx=i: self._energy_open_list(idx, e.new), "value")
+        open_sel.param.watch(lambda e, idx=i: open_fn(idx, e.new), "value")
         status = ""
         if ax.params.get("list_name"):
             status = ("<span style='color:#2e7d32;font-size:12px'>↳ generates "
-                      "<code>resolve_list(\"{}\", kind=\"energy\")</code></span>".format(
-                          ax.params["list_name"]))
+                      "<code>resolve_list(\"{}\", kind=\"{}\")</code></span>".format(
+                          ax.params["list_name"], kind))
         loc = ("" if self.listdb is None
                else "<span style='color:#777;font-size:11px'> · {}</span>".format(
                    self.listdb.location))
@@ -1474,6 +1741,16 @@ class AcquireApp:
                          "(no copy-paste); open to edit a stored one</span>" + loc),
             pn.Row(name_in, save, open_sel),
             pn.pane.HTML(status) if status else pn.pane.HTML(""))
+
+    def _energy_named_list_row(self, i, ax):
+        """Name / save / open controls for the energy region set (a ``NamedList(kind="energy")``).
+
+        Saving stores the authoritative materialized ``values`` (what the plan resolves), the
+        ``{boundaries, steps, updown}`` ``spec`` (so the graphical editor can re-open it), and
+        ``md`` extras (flux re-seek). See :meth:`_named_list_row`.
+        """
+        return self._named_list_row(i, ax, "energy", save_fn=self._energy_save_list,
+                                    open_fn=self._energy_open_list, label="energy")
 
     def _energy_plot(self, i, ax, pts, bounds):
         """A Bokeh preview: energy points as dots + draggable boundary markers (write back)."""
@@ -1802,6 +2079,8 @@ class AcquireApp:
             fields.append(self._energy_fields(i, ax))
             for f in axis_param_schema(ax.type):
                 fields.append(self._param_widget(ax, f, None, self._render_wizard))
+        elif ax.type == "temperature":
+            fields.append(self._temperature_fields(i, ax))
         else:
             for f in axis_param_schema(ax.type):
                 fields.append(self._param_widget(ax, f, None, self._render_wizard))

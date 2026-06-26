@@ -247,6 +247,64 @@ def test_named_energy_dry_runs_without_redis():
     assert rep.runs == 1
 
 
+def test_codegen_named_incidence_uses_resolve_list():
+    sp = ExperimentSpec(axes=[AxisSpec("incidence",
+                                       {"values": [0.1, 0.2], "list_name": "grazing_fine"})])
+    sp.samples.rows = [{"name": "s1"}]
+    src = codegen.render(sp)
+    assert "resolve_list('grazing_fine', kind=\"incidence\", store=lists)" in src
+    assert "from smi_plans import resolve_list, ListStore" in src
+    assert "incidence_axis(piezo.th" in src
+    ast.parse(src)
+    # dry-run inlines the values (store-free)
+    dsrc = codegen.render(sp, for_dryrun=True)
+    assert "resolve_list(" not in dsrc and "[0.1, 0.2]" in dsrc
+    ast.parse(dsrc)
+
+
+def test_codegen_named_temperature_uses_resolve_list_and_keeps_soak():
+    sp = ExperimentSpec(axes=[AxisSpec("temperature",
+                                       {"values": [30, 60, 90], "soak": 120, "first_soak": 300,
+                                        "list_name": "anneal"})])
+    sp.samples.rows = [{"name": "s1"}]
+    src = codegen.render(sp)
+    assert "resolve_list('anneal', kind=\"temperature\", store=lists)" in src
+    assert "soak=120" in src and "first_soak=300" in src   # run params stay alongside the list
+    ast.parse(src)
+
+
+def test_temperature_cycle_doubles_setpoints():
+    """A temperature axis with cycle goes up then back down (anneal-then-cool)."""
+    base = AxisSpec("temperature", {"values": [30, 60, 90]})
+    cyc = AxisSpec("temperature", {"values": [30, 60, 90], "cycle": True})
+    assert base.values() == [30, 60, 90]
+    assert cyc.values() == [30, 60, 90, 90, 60, 30]
+    assert cyc.n_points() == 6
+
+
+def test_temperature_axis_defaults_heater_when_unset():
+    """A temperature axis references `heater`; codegen must emit a heater even if none configured."""
+    sp = ExperimentSpec(axes=[AxisSpec("temperature", {"values": [30, 60]})])
+    sp.samples.rows = [{"name": "s1"}]
+    assert sp.apparatus.heater is None       # not configured
+    src = codegen.render(sp)
+    assert "heater = linkam_heater()" in src   # defaulted so the script is valid
+    assert "from smi_plans.technique_C_temperature import linkam_heater" in src
+    ast.parse(src)
+
+
+def test_incidence_named_dry_runs():
+    from smi_acquire import dryrun
+    sp = ExperimentSpec(axes=[AxisSpec("incidence",
+                                       {"values": [0.1, 0.2], "list_name": "grazing_fine"})])
+    sp.samples.rows = [{"name": "s1"}]
+    rep = dryrun.dry_run(sp)
+    if rep.error and "smi_plans not importable" in rep.error:
+        import pytest
+        pytest.skip("smi_plans not importable in this env")
+    assert rep.ok, rep.error
+
+
 # ---------------------------------------------------------------------------
 # message purity — generated plans must contain ONLY messages
 # (smi-plans tenet: never a bare device .put()/.get()/.set() inside a plan;

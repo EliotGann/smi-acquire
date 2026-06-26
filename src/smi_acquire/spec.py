@@ -100,26 +100,27 @@ class AxisSpec:
 
         Expands an energy ``grid`` (segments) and a ``range: [start, stop, step]`` shorthand
         (inclusive of ``stop`` within float tolerance) used by value-list axes like ``incidence``
-        — so the user can give a start/stop/step instead of listing every point. An explicit
-        ``values`` list always wins if present.
+        and ``temperature`` — so the user can give a start/stop/step instead of listing every
+        point. An explicit ``values`` list always wins if present.
 
-        Energy ``updown``: when ``params['updown']`` is true the expanded (ascending) energy
-        points are followed by the SAME points reversed — ``pts + pts[::-1]`` — so the scan goes
-        up to the top energy then back down to the start (doubling it, ending where it began).
-        This matches the SMI ``nexafs_run(updown=True)`` convention (the turnaround point is
-        visited twice).
+        ``updown`` / ``cycle``: when true the expanded (ascending) points are followed by the SAME
+        points reversed — ``pts + pts[::-1]`` — so the scan goes up to the top then back down to
+        the start (doubling it, ending where it began). For energy this matches the SMI
+        ``nexafs_run(updown=True)`` convention; for temperature it is an anneal-then-cool cycle
+        (the turnaround point is visited twice).
         """
         p = self.params
+
+        def _cycle(pts):
+            return (pts + pts[::-1]) if ((p.get("updown") or p.get("cycle")) and pts) else pts
+
         if p.get("values"):
-            return list(p.get("values") or [])
+            return _cycle(list(p.get("values") or []))
         if self.type == "energy" and "grid" in p:
-            pts = energy_grid_values(p["grid"])
-            if p.get("updown") and pts:
-                pts = pts + pts[::-1]
-            return pts
+            return _cycle(energy_grid_values(p["grid"]))
         rng = p.get("range")
         if rng and len(rng) == 3:
-            return _arange(float(rng[0]), float(rng[1]), float(rng[2]))
+            return _cycle(_arange(float(rng[0]), float(rng[1]), float(rng[2])))
         return list(p.get("values", []) or [])
 
 

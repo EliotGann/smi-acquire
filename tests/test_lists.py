@@ -88,3 +88,26 @@ def test_stored_list_resolves_by_name_via_smi_plans():
 
 def test_kinds_constant_covers_the_four_editors():
     assert set(KINDS) == {"energy", "incidence", "temperature", "time"}
+
+
+def test_incidence_list_roundtrips_range_spec():
+    acq = _store()
+    acq.save_list("grazing_fine", "incidence", [0.1, 0.2, 0.3, 0.4],
+                  spec={"range": [0.1, 0.4, 0.1]}, units="deg")
+    nl = acq.get_list("grazing_fine", "incidence")
+    assert nl.kind == "incidence"
+    assert nl.values == [0.1, 0.2, 0.3, 0.4]
+    assert nl.spec == {"range": [0.1, 0.4, 0.1]}
+    assert resolve_list("grazing_fine", kind="incidence", store=acq.store) == [0.1, 0.2, 0.3, 0.4]
+
+
+def test_temperature_list_roundtrips_cycle_and_rate():
+    acq = _store()
+    acq.save_list("anneal_cycle", "temperature", [30.0, 60.0, 90.0, 90.0, 60.0, 30.0],
+                  spec={"values": [30.0, 60.0, 90.0], "cycle": True},
+                  units="C", md={"ramp_rate": 5.0, "soak": 120.0, "first_soak": 300.0})
+    nl = acq.get_list("anneal_cycle", "temperature")
+    assert nl.values == [30.0, 60.0, 90.0, 90.0, 60.0, 30.0]   # materialized post-cycle
+    assert nl.spec == {"values": [30.0, 60.0, 90.0], "cycle": True}
+    assert nl.md["ramp_rate"] == 5.0 and nl.md["first_soak"] == 300.0
+
