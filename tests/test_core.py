@@ -197,6 +197,57 @@ def test_codegen_emits_heater_and_manual_imports():
 
 
 # ---------------------------------------------------------------------------
+# named lists (Redis-first): a named energy axis references the store by name
+# ---------------------------------------------------------------------------
+def _named_energy_spec():
+    g = {"boundaries": [2470.0, 2472.0, 2476.0], "steps": [1.0, 0.25]}
+    sp = ExperimentSpec(axes=[AxisSpec("energy", {"grid": g, "list_name": "Fe_K_XANES"})])
+    sp.samples.rows = [{"name": "s1"}]
+    return sp
+
+
+def test_codegen_named_energy_uses_resolve_list():
+    src = codegen.render(_named_energy_spec())
+    assert "resolve_list('Fe_K_XANES', kind=\"energy\", store=lists)" in src
+    assert "from smi_plans import resolve_list, ListStore" in src
+    assert "lists = ListStore.from_redis()" in src
+    # the literal eV list must NOT be pasted into the energy_axis call
+    assert "energy_axis([2470" not in src
+    ast.parse(src)
+
+
+def test_codegen_unnamed_energy_stays_literal():
+    g = {"boundaries": [2470.0, 2472.0, 2476.0], "steps": [1.0, 0.25]}
+    sp = ExperimentSpec(axes=[AxisSpec("energy", {"grid": g})])   # no list_name
+    sp.samples.rows = [{"name": "s1"}]
+    src = codegen.render(sp)
+    assert "resolve_list(" not in src
+    assert "ListStore" not in src
+    assert "energy_axis([2470" in src      # literal list inlined
+    ast.parse(src)
+
+
+def test_dryrun_render_inlines_named_list_values():
+    """The dry-run render must be store-free: no resolve_list / ListStore, values inlined."""
+    src = codegen.render(_named_energy_spec(), for_dryrun=True)
+    assert "resolve_list(" not in src
+    assert "ListStore" not in src
+    assert "energy_axis([2470" in src
+    ast.parse(src)
+
+
+def test_named_energy_dry_runs_without_redis():
+    """A spec with a named energy list must dry-run (the validator inlines the values)."""
+    from smi_acquire import dryrun
+    rep = dryrun.dry_run(_named_energy_spec())
+    if rep.error and "smi_plans not importable" in rep.error:
+        import pytest
+        pytest.skip("smi_plans not importable in this env")
+    assert rep.ok, rep.error
+    assert rep.runs == 1
+
+
+# ---------------------------------------------------------------------------
 # message purity — generated plans must contain ONLY messages
 # (smi-plans tenet: never a bare device .put()/.get()/.set() inside a plan;
 #  use yield from bps.mv / bps.rd. Mirrors smi-plans/tests/test_message_purity.py.)

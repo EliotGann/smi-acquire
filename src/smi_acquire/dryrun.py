@@ -94,7 +94,8 @@ def _inject(sim) -> None:
 
 def dry_run(spec: ExperimentSpec) -> DryRunReport:
     """Render ``spec`` → script, exec it under the sim, and report runs/events/warnings/errors."""
-    script = codegen.render(spec, run=True)
+    # Inline named-list values (for_dryrun) so the script execs under the sim with no Redis.
+    script = codegen.render(spec, run=True, for_dryrun=True)
     n_samples = spec.n_samples()
     spec_warnings = spec.order_warnings()
 

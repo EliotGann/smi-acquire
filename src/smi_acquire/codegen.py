@@ -111,12 +111,16 @@ def _energy_values_src(axis: AxisSpec) -> str:
     return _numlist(axis.values())
 
 
-def _render_axis(axis: AxisSpec, *, aligned: bool = False) -> str:
+def _render_axis(axis: AxisSpec, *, aligned: bool = False, named_lists: bool = True) -> str:
     """Return the source for one axis: an expression, or ``*expr`` for spatial (a list).
 
     ``aligned`` is True when a pre-run alignment hook runs: incidence then anchors to the
     aligned zero (``th0=None``, relative) rather than a pre-read ``piezo.th.position`` (which,
     in ``acquire_bar``, ``axes_for`` reads BEFORE the align hook -> the nominal, not aligned, th).
+
+    ``named_lists`` (True for the copy-paste script) emits ``resolve_list(name, ...)`` for a named
+    energy list; False (the dry-run) forces the literal expanded values, so the dry-run is
+    store-free and faithful to the values the GUI is holding.
     """
     t = axis.type
     p = axis.params
@@ -124,8 +128,14 @@ def _render_axis(axis: AxisSpec, *, aligned: bool = False) -> str:
         extra = ""
         if p.get("flux_reseek"):
             extra = ", flux_signal=xbpm2.sumX, flux_threshold=50"
+        # Redis-first: a named energy list references the shared store by name (no copy-paste);
+        # an unnamed axis (or a dry-run) falls back to the literal expanded eV list. resolve_list
+        # needs the store, so the generated script opens one (``lists``) -- see render().
+        name = p.get("list_name") if named_lists else None
+        vsrc = ("resolve_list({!r}, kind=\"energy\", store=lists)".format(name) if name
+                else _energy_values_src(axis))
         return "energy_axis({}, settle={}{})".format(
-            _energy_values_src(axis), _num(p.get("settle", 2.0)), extra)
+            vsrc, _num(p.get("settle", 2.0)), extra)
     if t == "temperature":
         kw = ", soak={}".format(_num(p.get("soak", 60.0)))
         if p.get("first_soak") is not None:
@@ -191,14 +201,19 @@ def _needed_builders(spec: ExperimentSpec) -> List[str]:
 # the full script
 # ---------------------------------------------------------------------------
 def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool = True,
-           add_syspath: bool = False) -> str:
+           add_syspath: bool = False, for_dryrun: bool = False) -> str:
     """ExperimentSpec → a complete, copy-pasteable ``smi_plans`` script string.
 
     ``smi_plans`` is normally already importable in the beamline session (it is an editable
     install), so by default **no** ``sys.path`` manipulation is emitted. Pass
     ``add_syspath=True`` (optionally with ``templates_path``) to prepend the smi_plans ``src``
     directory in the generated script — useful only when pasting into a bare interpreter.
+
+    ``for_dryrun`` renders the same plan but inlines named-list values (no ``resolve_list`` /
+    ``ListStore.from_redis()``), so the dry-run validator can exec it under the simulated
+    beamline with no Redis. The GUI holds the resolved values, so the dry-run stays faithful.
     """
+    named_lists = not for_dryrun
     ap = spec.apparatus
     multi = len(spec.samples.rows) != 1
     builder = "acquire_bar" if multi else "acquire"
@@ -250,6 +265,13 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
         "from smi_plans._core import saxs_waxs_dets",
         "from smi_plans import SampleList",
     ]
+    # Redis-first: a named energy list resolves from the shared store by name. resolve_list
+    # requires the store, so open one in the script and pass it (mirrors load_holder's seam).
+    # Skipped under for_dryrun (values are inlined for a store-free dry-run).
+    needs_resolve_list = named_lists and any(
+        a.type == "energy" and a.params.get("list_name") for a in spec.axes)
+    if needs_resolve_list:
+        L.append("from smi_plans import resolve_list, ListStore")
     if needs_bps:
         L.append("import bluesky.plan_stubs as bps")
     if needs_signal:
@@ -272,6 +294,9 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
     heater_call = heater_identifier(spec.apparatus.heater)
     if heater_call:
         L.append("heater = {}".format(heater_call))
+    # Open the named-list store once if any axis references a list by name.
+    if needs_resolve_list:
+        L.append("lists = ListStore.from_redis()   # shared db=2 'swaxslists' (named scan inputs)")
 
     # ---- manual-setup signals ---------------------------------------------
     for step in spec.manual_setup:
@@ -303,7 +328,8 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
     if spec.axes:
         L.append("    return [")
         for a in spec.axes:
-            L.append("        {},".format(_render_axis(a, aligned=has_align)))
+            L.append("        {},".format(
+                _render_axis(a, aligned=has_align, named_lists=named_lists)))
         L.append("    ]")
     else:
         L.append("    return []")

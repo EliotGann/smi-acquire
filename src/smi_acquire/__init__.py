@@ -12,6 +12,8 @@ Headless core (pure Python; no Panel):
 
 * :mod:`smi_acquire.store`     — the boundary onto the shared **redis db=2 sample store**
   (``smi_plans.SampleStore``): holders + samples + the active-sample pointer live there.
+* :mod:`smi_acquire.lists`     — the boundary onto the shared **redis db=2 named-list store**
+  (``smi_plans.ListStore``): reusable energy/incidence/temperature/time lists referenced by name.
 * :mod:`smi_acquire.project`   — the **local** session document: transient experiment *recipes*
   (which target a holder / all samples) + local reference fiducials.
 * :mod:`smi_acquire.spec`      — the ``ExperimentSpec`` scan-recipe model codegen/dryrun consume.
@@ -27,7 +29,7 @@ Interactive + simulation:
 * :mod:`smi_acquire.sim`        — the fake caproto IOC + in-process ``SimBeamline``.
 """
 
-from . import spec, registry, interview, codegen, samples, project, store  # noqa: F401
+from . import spec, registry, interview, codegen, samples, project, store, lists  # noqa: F401
 
-__all__ = ["spec", "registry", "interview", "codegen", "samples", "project", "store"]
+__all__ = ["spec", "registry", "interview", "codegen", "samples", "project", "store", "lists"]
 __version__ = "0.1.0"

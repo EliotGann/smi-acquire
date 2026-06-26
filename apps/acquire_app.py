@@ -32,6 +32,7 @@ from smi_acquire import codegen, dryrun, registry
 from smi_acquire.interview import axis_param_schema, default_axis
 from smi_acquire.project import Project, Experiment, Reference
 from smi_acquire.store import AcquireStore
+from smi_acquire.lists import AcquireListStore
 from smi_acquire.execute import LocalExecutor, QueueServerExecutor, InterlockedError
 from smi_acquire.interlock import Interlock
 
@@ -150,6 +151,7 @@ def _icon_card_button(icon, label, color, selected, *, sub="", width=215, height
 class AcquireApp:
     def __init__(self):
         self.store = AcquireStore.connect()    # live redis db=2 (auto-falls back offline)
+        self.listdb = AcquireListStore.connect()   # live redis db=2 'swaxslists' named lists
         self.project = Project(name="")        # local: recipes + references only
         # Motion seam: jog directly via ophyd (interlock-gated); submit = copy-paste to the
         # beamline RunEngine.  The interlock reads the external RE-busy flag (db=3, read-only).
@@ -1265,7 +1267,42 @@ class AcquireApp:
             pn.pane.HTML("<b>Energy regions</b> &nbsp;<span style='color:#777;font-size:12px'>"
                          "boundaries + a step (density) per region — drag the boundary dots on the "
                          "plot, or edit below</span>"),
-            plot, count, rows, add, updown)
+            plot, count, rows, add, updown,
+            self._energy_named_list_row(i, ax))
+
+    def _energy_named_list_row(self, i, ax):
+        """Name / save / open controls so an energy region set becomes a reusable NamedList.
+
+        Saving writes a ``NamedList(kind="energy")`` to the shared db=2 list store: the
+        authoritative materialized ``values`` (what the plan resolves), the ``{boundaries, steps,
+        updown}`` ``spec`` (so the graphical editor can re-open and edit it), and ``md`` extras
+        (flux re-seek threshold) used only for nice interactions. Opening loads one back into this
+        editor. When a list is named, the generated script references it by name via
+        ``resolve_list(...)`` instead of pasting the eV list.
+        """
+        name_in = pn.widgets.TextInput(
+            placeholder="name this energy list…", width=200,
+            value=str(ax.params.get("list_name") or ""))
+        save = pn.widgets.Button(name="⤓ save list", width=110, button_type="primary",
+                                 disabled=self.listdb is None)
+        save.on_click(lambda _e, idx=i, w=name_in: self._energy_save_list(idx, w.value))
+        opts = ["(load saved…)"] + (self.listdb.list_names("energy") if self.listdb else [])
+        open_sel = pn.widgets.Select(options=opts, width=180, value="(load saved…)")
+        open_sel.param.watch(lambda e, idx=i: self._energy_open_list(idx, e.new), "value")
+        status = ""
+        if ax.params.get("list_name"):
+            status = ("<span style='color:#2e7d32;font-size:12px'>↳ generates "
+                      "<code>resolve_list(\"{}\", kind=\"energy\")</code></span>".format(
+                          ax.params["list_name"]))
+        loc = ("" if self.listdb is None
+               else "<span style='color:#777;font-size:11px'> · {}</span>".format(
+                   self.listdb.location))
+        return pn.Column(
+            pn.pane.HTML("<b>Reusable list</b> "
+                         "<span style='color:#777;font-size:12px'>save to reference by name "
+                         "(no copy-paste); open to edit a stored one</span>" + loc),
+            pn.Row(name_in, save, open_sel),
+            pn.pane.HTML(status) if status else pn.pane.HTML(""))
 
     def _energy_plot(self, i, ax, pts, bounds):
         """A Bokeh preview: energy points as dots + draggable boundary markers (write back)."""
@@ -1311,6 +1348,17 @@ class AcquireApp:
         bsrc.on_change("data", _on_drag)
         return pn.pane.Bokeh(fig, sizing_mode="stretch_width")
 
+    def _energy_dirty(self, i):
+        """Editing the regions detaches the axis from any saved list name.
+
+        The generated script must always reflect exactly what's on screen; once the user changes
+        boundaries/steps/updown, the stored list no longer matches, so we drop ``list_name`` (the
+        codegen then emits the literal list until the user re-saves under a name).
+        """
+        st = self.wizard
+        if 0 <= i < len(st.axes):
+            st.axes[i].params.pop("list_name", None)
+
     def _energy_set_region(self, i, reg, lo, hi, step):
         st = self.wizard
         if not (0 <= i < len(st.axes)):
@@ -1323,6 +1371,7 @@ class AcquireApp:
             s[reg] = float(step)
             # keep boundaries monotonic (a shared boundary moves both neighbors)
             g["boundaries"] = b
+        self._energy_dirty(i)
         self._render_wizard()
 
     def _energy_set_updown(self, i, on):
@@ -1332,6 +1381,7 @@ class AcquireApp:
                 st.axes[i].params["updown"] = True
             else:
                 st.axes[i].params.pop("updown", None)
+        self._energy_dirty(i)
         self._render_wizard()
 
     def _energy_set_boundaries(self, i, xs):
@@ -1347,6 +1397,7 @@ class AcquireApp:
         else:
             g["boundaries"] = new_b
             g["steps"] = (g["steps"] + [1.0] * len(new_b))[:max(0, len(new_b) - 1)]
+        self._energy_dirty(i)
         self._render_wizard()
 
     def _energy_add_region(self, i):
@@ -1360,6 +1411,7 @@ class AcquireApp:
         mid = round((lo + hi) / 2, 4)
         b.insert(len(b) - 1, mid)
         s.append(s[-1] if s else 1.0)
+        self._energy_dirty(i)
         self._render_wizard()
 
     def _energy_remove_boundary(self, i, reg):
@@ -1374,7 +1426,76 @@ class AcquireApp:
             b.pop(drop)
             if reg < len(s):
                 s.pop(reg)
+        self._energy_dirty(i)
         self._render_wizard()
+
+    # ---- energy: reusable NamedList (save / open) -----------------------
+    def _energy_save_list(self, i, name):
+        """Persist the current energy region set as a NamedList(kind='energy') in db=2.
+
+        Stores authoritative ``values`` (the eV points the plan resolves), the editable ``spec``
+        (``{boundaries, steps, updown}`` — re-openable in this graphical editor) and ``md`` extras
+        (flux re-seek) used only for nice interactions. Tags the axis with ``list_name`` so codegen
+        emits ``resolve_list(name, kind="energy")`` instead of the literal list.
+        """
+        from smi_acquire.spec import energy_grid_values
+        name = (name or "").strip()
+        st = self.wizard
+        if not (0 <= i < len(st.axes)):
+            return
+        if not name:
+            _toast("type a name for the energy list first", "warning")
+            return
+        if self.listdb is None:
+            _toast("no list store connected", "error")
+            return
+        ax = st.axes[i]
+        g = self._energy_grid(ax)
+        values = energy_grid_values(g)
+        spec = {"boundaries": list(g["boundaries"]), "steps": list(g["steps"]),
+                "updown": bool(ax.params.get("updown"))}
+        md = {}
+        if ax.params.get("flux_reseek"):
+            md["flux_reseek"] = True
+        try:
+            self.listdb.save_list(name, "energy", values, spec=spec, units="eV", md=md)
+        except Exception as exc:  # noqa: BLE001
+            _toast("save failed: {}".format(exc), "error")
+            return
+        ax.params["list_name"] = name
+        self._render_wizard()
+        _toast("saved energy list '{}' ({} points)".format(name, len(values)))
+
+    def _energy_open_list(self, i, name):
+        """Load a stored energy NamedList back into the editor (restores boundaries/steps/updown)."""
+        if not name or name == "(load saved…)":
+            return
+        st = self.wizard
+        if not (0 <= i < len(st.axes)) or self.listdb is None:
+            return
+        nl = self.listdb.get_list(name, "energy")
+        if nl is None:
+            _toast("energy list '{}' not found".format(name), "warning")
+            return
+        ax = st.axes[i]
+        spec = nl.spec or {}
+        if "boundaries" in spec and "steps" in spec:
+            ax.params["grid"] = {"boundaries": [float(x) for x in spec["boundaries"]],
+                                 "steps": [float(x) for x in spec["steps"]]}
+        elif nl.values:
+            # spec-less entry: rebuild a single fine region spanning the stored values
+            vals = [float(v) for v in nl.values]
+            ax.params["grid"] = {"boundaries": [vals[0], vals[-1]],
+                                 "steps": [vals[1] - vals[0] if len(vals) > 1 else 1.0]}
+        if spec.get("updown"):
+            ax.params["updown"] = True
+        else:
+            ax.params.pop("updown", None)
+        if (nl.md or {}).get("flux_reseek"):
+            ax.params["flux_reseek"] = True
+        ax.params["list_name"] = name
+        self._render_wizard()
+        _toast("opened energy list '{}'".format(name))
 
     # ==================================================================
     # STEP 4 — Compose & target (the nested-box canvas)
