@@ -104,3 +104,44 @@ retired.
 → devices. Because the spec is pure data and names-only, this is purely additive: a new consumer
 of the same spec, with the GUI untouched. An `Executor` abstraction (`CopyPasteExecutor` now,
 `QueueServerExecutor` later) is the intended insertion point.
+
+## Redis, by name (the copy-paste-reduction direction)
+
+The shared **redis db=2** store proved to be an excellent GUI↔profile channel: the GUI references
+samples/holders **by name** with zero copy-paste of coordinate lists. We extend that to the other
+big scan inputs — **energies, incident angles, temperatures, exposure/period times** — via the
+backend's named-list library (`smi_plans.NamedList` / `ListStore` / `resolve_list`).
+
+- `lists.AcquireListStore` is the GUI's own db=2 connection (prefix `swaxslists`), mirroring
+  `store.AcquireStore`. The per-type graphical editors (energy first) gain **name / save / open**:
+  a list persists as a `NamedList` carrying authoritative `values` (what the plan resolves), an
+  editable `spec` (the editor's `{boundaries, steps, …}`), and `md` extras (thresholds, ramp/hold,
+  …) used only for nice interactions.
+- `codegen` then emits `resolve_list("Name", kind=…, store=lists)` (opening one `ListStore` in the
+  script) instead of pasting the list; an unnamed axis falls back to the literal list. The dry-run
+  render (`render(..., for_dryrun=True)`) **inlines** the held values so it stays Redis-free.
+
+### Sample run order (priority)
+
+The master sample list is shown in **run order**: a per-sample `priority` (lower runs first)
+controls it, edited via the `pri` column + ▲/▼ + "renumber 1..N". `project.resolve_target` sorts
+by it so the generated bar runs in the displayed order. **Stopgap:** priority lives on
+`Sample.md['priority']` until `smi_plans` gains a native field.
+
+### Cross-repo follow-ups (owed to smi-plans — not yet done)
+
+These are deliberately deferred to coordinated `smi-plans` changes; the GUI works today without
+them, but they close the loop:
+
+1. **`Sample.priority` native field** + make it the **primary sort key in `load_holder`**
+   (`smi_plans/_holder.py` `_key`), so the *runtime* `load_holder("bar")` order matches the GUI.
+   Until then, runtime order is only guaranteed when codegen emits an explicitly-ordered bar.
+2. **`project_name` on every scan** — currently an optional `md` passthrough in
+   `_compose.acquire`; the requirement is that it is always carried (and may vary per sample).
+3. **`resolve_list` default store** — it raises on a name with no `store=`, unlike `load_holder`
+   which auto-opens one; the GUI works around this by emitting an explicit `ListStore.from_redis()`.
+   A session-default would let the generated call read as `resolve_list("Name", kind="energy")`.
+4. **Per-kind spec builders** for `temperature` (ramp/hold/cycle) and richer `incidence`, so the
+   backend can re-materialize those lists from `spec` (today only `values` is authoritative + the
+   energy edge / generic linspace builders exist).
+5. **A proposal redis key** the GUI can read **read-only** (it must not import the profile/RE.md).

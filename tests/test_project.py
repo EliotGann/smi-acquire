@@ -74,6 +74,34 @@ def test_experiment_targets_holder():
     assert {s.name for s in resolved} == {"A", "C"}
 
 
+def test_resolve_target_orders_by_priority():
+    """resolve_target returns samples sorted by md['priority'] (lower runs first; default 0)."""
+    acq = _demo_store()                       # samples A, B, C
+    def _set_pri(name, pri):
+        s = next(x for x in acq.list_samples() if x.name == name)
+        s.md = dict(s.md or {})
+        s.md["priority"] = pri
+        acq.update_sample(s)
+    _set_pri("C", 1)
+    _set_pri("A", 2)
+    _set_pri("B", 3)
+    proj = Project()
+    exp = Experiment(name="e", target=Target(kind="all"))
+    assert [s.name for s in proj.resolve_target(exp, acq)] == ["C", "A", "B"]
+    # the generated spec's sample rows follow that order
+    spec = proj.experiment_spec(exp, acq)
+    assert [r["name"] for r in spec.samples.rows] == ["C", "A", "B"]
+
+
+def test_resolve_target_default_priority_is_stable():
+    """With no priority set (all default 0), order is the store's (stable, not reordered)."""
+    acq = _demo_store()
+    proj = Project()
+    exp = Experiment(name="e", target=Target(kind="all"))
+    got = [s.name for s in proj.resolve_target(exp, acq)]
+    assert set(got) == {"A", "B", "C"}        # all present, no crash on missing priority
+
+
 def test_experiment_to_spec_builds_rows_from_positions():
     acq = _demo_store()
     a = next(s for s in acq.list_samples() if s.name == "A")

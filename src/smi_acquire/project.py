@@ -38,6 +38,18 @@ def _new_id() -> str:
     return uuid.uuid4().hex[:8]
 
 
+def _sample_priority(sample) -> int:
+    """A sample's run-order priority (lower runs first; default 0).
+
+    Stored on ``Sample.md['priority']`` as a stopgap until ``smi_plans.Sample`` gains a native
+    ``priority`` field (which will also make ``load_holder`` order by it). See docs/DESIGN.md.
+    """
+    try:
+        return int((sample.md or {}).get("priority", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 # ---------------------------------------------------------------------------
 # Reference (local fiducial marker)
 # ---------------------------------------------------------------------------
@@ -185,16 +197,19 @@ class Project:
         """The sample subset an experiment runs on, read from the shared sample ``store``.
 
         ``store`` is an :class:`smi_acquire.store.AcquireStore`.  Returns ``smi_plans.Sample``
-        objects.  Only positioned samples are truly measurable, but (matching the old behavior)
-        unpositioned ones are returned too so the GUI can warn.
+        objects **sorted by run-order priority** (lower first) so the generated bar runs them in
+        the same order the GUI's sample list shows.  Only positioned samples are truly measurable,
+        but (matching the old behavior) unpositioned ones are returned too so the GUI can warn.
         """
         t = experiment.target
         if t.kind == "holder" and t.holder_id:
-            return store.list_samples(holder_id=t.holder_id)
-        if t.kind == "samples":
+            samples = store.list_samples(holder_id=t.holder_id)
+        elif t.kind == "samples":
             ids = set(t.sample_ids)
-            return [s for s in store.list_samples() if s.id in ids]
-        return store.list_samples()
+            samples = [s for s in store.list_samples() if s.id in ids]
+        else:
+            samples = store.list_samples()
+        return sorted(samples, key=_sample_priority)
 
     # ---- codegen / validation per experiment ------------------------------
     def experiment_spec(self, experiment: Experiment, store) -> ExperimentSpec:

@@ -239,13 +239,15 @@ class AcquireApp:
         self.spine = pn.widgets.Tabulator(
             value=self._spine_df(), show_index=False, selectable="checkbox", height=320,
             theme="simple",
-            widths={"name": 110, "holder": 84, "x": 58, "y": 58, "z": 50, "incidence": 74,
-                    "scan": 46, "ref": 40, "active": 48, "md": 110},
+            widths={"name": 104, "pri": 40, "holder": 80, "x": 56, "y": 56, "z": 48,
+                    "incidence": 70, "scan": 44, "ref": 38, "active": 44, "md": 100},
             editors={"name": {"type": "input"}, "holder": {"type": "input"},
                      "incidence": {"type": "input"}, "md": {"type": "input"},
+                     "pri": {"type": "number"},
                      "scan": {"type": "tickCross"},
                      "x": None, "y": None, "z": None, "ref": None, "active": None},
             formatters={"scan": {"type": "tickCross"}, "ref": {"type": "tickCross"}},
+            titles={"pri": "▲"},
         )
         self.spine.on_edit(self._on_spine_edit)
 
@@ -257,6 +259,16 @@ class AcquireApp:
         load.on_click(self._on_set_active)
         goto = pn.widgets.Button(name="→ go to position", width=150)
         goto.on_click(self._on_goto_selected)
+
+        # Run-order (priority) controls: the list is always shown in run order (lowest
+        # priority first). ▲/▼ move the selected sample one step; "renumber" normalizes to
+        # 1..N in the current order.
+        pri_up = pn.widgets.Button(name="▲ up", width=70)
+        pri_up.on_click(lambda _e: self._on_priority_move(-1))
+        pri_down = pn.widgets.Button(name="▼ down", width=80)
+        pri_down.on_click(lambda _e: self._on_priority_move(+1))
+        pri_renum = pn.widgets.Button(name="⇅ renumber 1..N", width=150)
+        pri_renum.on_click(lambda _e: self._on_priority_renumber())
 
         # Holders sub-panel (replaces the old "Sets").
         new_holder = pn.widgets.TextInput(placeholder="new holder name…", width=130)
@@ -289,11 +301,13 @@ class AcquireApp:
             self.spine,
             pn.Row(add, rm),
             pn.Row(load, goto),
+            pn.Row(pri_up, pri_down, pri_renum),
             pn.pane.Markdown(
-                "<span style='color:#777;font-size:11px'>Tick <b>scan</b> to include a sample "
-                "as a target for the Scan tabs. <b>ref</b> marks a reference landmark (yellow on "
-                "the image, never scanned). <b>go to position</b> moves the stage to the selected "
-                "row.</span>"),
+                "<span style='color:#777;font-size:11px'>The list is shown in <b>run order</b> "
+                "(<b>pri</b> column, lowest first); <b>▲/▼</b> move the selected sample, "
+                "<b>renumber</b> normalizes to 1..N (or edit <b>pri</b> directly). Tick <b>scan</b> "
+                "to include a sample as a Scan-tab target; <b>ref</b> marks a reference landmark "
+                "(never scanned). <b>go to position</b> moves the stage to the selected row.</span>"),
             self.sample_detail,
             pn.layout.Divider(),
             pn.pane.Markdown("**Holders**"),
@@ -312,14 +326,17 @@ class AcquireApp:
         ``_spine_rows`` is the parallel typed identity for each row — ``("sample", id)`` or
         ``("ref", id)`` — so selection actions know what each selected row is.  The ``scan``
         flag is read back from the microscope engine (where per-session scan-target state
-        lives); ``ref`` rows are never scan targets.
+        lives); ``ref`` rows are never scan targets.  Samples are **sorted by priority** (lower
+        runs first) — the displayed order IS the run order; references trail after.
         """
         active = self.store.active_sample()
         active_id = active.id if active is not None else None
         scan_names = self._scan_ticked_names()
         self._spine_rows: list[tuple[str, str]] = []
         rows = []
-        for s in self.store.list_samples():
+        # Stable sort by priority (lower first); equal priority keeps store order.
+        samples = sorted(self.store.list_samples(), key=self._sample_priority)
+        for s in samples:
             self._spine_rows.append(("sample", s.id))
             holder = self.store.holder_by_id(s.holder_id) if s.holder_id else None
             p = s.nominal
@@ -329,19 +346,21 @@ class AcquireApp:
             angles = s.incident_angles or p.incident_angles
             rows.append({
                 "name": s.name,
+                "pri": self._sample_priority(s),
                 "holder": holder.name if holder is not None else "",
                 "x": x, "y": y, "z": z,
                 "incidence": _fmt_floatlist(angles),
                 "scan": s.name in scan_names,
                 "ref": False,
                 "active": "◆" if s.id == active_id else "",
-                "md": json.dumps(s.md) if s.md else "",
+                "md": self._display_md(s.md),
             })
         # References (local project fiducials) appear in the same list, flagged ref=✓.
         for r in self.project.references:
             self._spine_rows.append(("ref", r.id))
             rows.append({
                 "name": r.name,
+                "pri": "",
                 "holder": "",
                 "x": r.x, "y": r.y, "z": r.z,
                 "incidence": "",
@@ -351,8 +370,30 @@ class AcquireApp:
                 "md": "",
             })
         return pd.DataFrame(
-            rows, columns=["name", "holder", "x", "y", "z", "incidence",
+            rows, columns=["name", "pri", "holder", "x", "y", "z", "incidence",
                            "scan", "ref", "active", "md"])
+
+    @staticmethod
+    def _sample_priority(sample) -> int:
+        """The sample's run-order priority (lower runs first; default 0).
+
+        Stored on ``Sample.md['priority']`` as a stopgap until ``smi_plans.Sample`` gains a
+        native ``priority`` field (which will also make ``load_holder`` order by it). See the
+        cross-repo note in docs/DESIGN.md.
+        """
+        try:
+            return int(sample.md.get("priority", 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _display_md(md) -> str:
+        """The md JSON shown in the spine, minus ``priority`` (which has its own column)."""
+        if not md:
+            return ""
+        shown = {k: v for k, v in md.items() if k != "priority"}
+        return json.dumps(shown) if shown else ""
+
 
     def _scan_ticked_names(self) -> set:
         """Names of samples currently ticked as scan targets (held by the microscope engine)."""
@@ -527,13 +568,78 @@ class AcquireApp:
             s.incident_angles = angles
             s.nominal.incident_angles = list(angles)
             self.store.update_sample(s)
+        elif col == "pri":
+            self._set_sample_priority(s, val)
         elif col == "md":
             try:
-                s.md = json.loads(val) if str(val).strip() else {}
+                new_md = json.loads(val) if str(val).strip() else {}
+                # The md column hides 'priority' (it has its own column); preserve it.
+                if "priority" in s.md and "priority" not in new_md:
+                    new_md["priority"] = s.md["priority"]
+                s.md = new_md
                 self.store.update_sample(s)
             except Exception:
                 _toast("metadata must be JSON", "warning")
         self.refresh_spine()
+
+    # ---- run-order (priority) -------------------------------------------
+    def _set_sample_priority(self, sample, value, *, refresh=False):
+        """Persist a sample's run-order priority on ``Sample.md['priority']`` (stopgap)."""
+        try:
+            pri = int(round(float(value)))
+        except (TypeError, ValueError):
+            _toast("priority must be a whole number", "warning")
+            return
+        sample.md = dict(sample.md or {})
+        sample.md["priority"] = pri
+        self.store.update_sample(sample)
+        if refresh:
+            self.refresh_spine()
+
+    def _on_priority_move(self, delta):
+        """Move the selected sample one step in run order by swapping priority with its neighbor.
+
+        Operates on the priority-sorted sample order (what the list shows). Renumbers the samples
+        to a dense 1..N first so a swap is always well-defined even if priorities were sparse/equal.
+        """
+        sel = self._selected_samples()
+        if len(sel) != 1:
+            _toast("select exactly one sample to move", "warning")
+            return
+        target = sel[0]
+        ordered = sorted(self.store.list_samples(), key=self._sample_priority)
+        # Dense renumber (1..N) in current order so positions are unambiguous.
+        for n, s in enumerate(ordered, start=1):
+            if self._sample_priority(s) != n:
+                self._set_sample_priority(s, n)
+        pos = next((k for k, s in enumerate(ordered) if s.id == target.id), None)
+        if pos is None:
+            return
+        swap = pos + delta
+        if not (0 <= swap < len(ordered)):
+            return  # already at an end
+        a, b = ordered[pos], ordered[swap]
+        # swap their (now dense) priorities
+        self._set_sample_priority(a, swap + 1)
+        self._set_sample_priority(b, pos + 1)
+        self.refresh_spine()
+        # keep the moved sample selected at its new row
+        new_order = [rid for kind, rid in self._spine_rows if kind == "sample"]
+        if target.id in new_order:
+            idx = next(i for i, (kind, rid) in enumerate(self._spine_rows)
+                       if kind == "sample" and rid == target.id)
+            self.spine.selection = [idx]
+
+    def _on_priority_renumber(self):
+        """Normalize every sample's priority to a dense 1..N in the current run order."""
+        ordered = sorted(self.store.list_samples(), key=self._sample_priority)
+        changed = 0
+        for n, s in enumerate(ordered, start=1):
+            if self._sample_priority(s) != n:
+                self._set_sample_priority(s, n)
+                changed += 1
+        self.refresh_spine()
+        _toast("renumbered {} sample(s) 1..{}".format(len(ordered), len(ordered)))
 
     def _edit_reference(self, ref_id, col, val):
         """Apply an inline edit to a reference row (only its name is editable here)."""
