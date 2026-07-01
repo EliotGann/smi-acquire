@@ -117,5 +117,14 @@ def test_dev_config_pvs_are_published_by_fake_ioc():
     expected += list(cfg.epics.motors.values())
     expected += list(cfg.epics.piezo_motors.values())
     expected += list(cfg.epics.stage_motors.values())
+    wide = cfg.wide_camera.camera
+    expected += [
+        wide.camera_prefix + wide.cam_suffix + suffix
+        for suffix in ("ColorMode_RBV", "AcquireTime", "AcquireTime_RBV")
+    ]
+    expected += [
+        wide.camera_prefix + "wideimage1:" + suffix
+        for suffix in ("ArraySize0_RBV", "ArraySize1_RBV", "ArraySize2_RBV", "ArrayData")
+    ]
 
     assert sorted(set(expected) - published) == []

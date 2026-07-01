@@ -6,6 +6,7 @@ Publishes:
   - SWAXS:SIM:cam1:ArraySize2_RBV  (uint, height)
   - SWAXS:SIM:cam1:ColorMode_RBV   (string, "RGB3")
   - SWAXS:SIM:image1:ArrayData     (uint8 buffer, drifting pattern)
+  - SWAXS:SIM:widecam1:* / wideimage1:*  (grayscale top/wide camera)
   - the stacked sample stage as fake motor records (SMI geometry):
       piezo (fine, top):  SWAXS:SIM:pzX / pzY / pzZ / pzTH / pzCHI
       Huber (coarse):     SWAXS:SIM:hX / hY / hZ / hTHETA / hCHI / hPHI
@@ -35,7 +36,10 @@ from caproto.server import PVGroup, SubGroup, ioc_arg_parser, pvproperty, run
 
 WIDTH = 640
 HEIGHT = 480
+WIDE_WIDTH = 640
+WIDE_HEIGHT = 360
 DEPTH = 3
+WIDE_DEPTH = 1
 FRAME_RATE_HZ = 10
 FIELD_TILES_X = 100
 FIELD_TILES_Y = 10
@@ -164,6 +168,26 @@ def _render_frame(t: float, mx: float, my: float, mz: float) -> np.ndarray:
     return np.clip(rgb.astype(np.float32) + halo, 0, 255).astype(np.uint8)
 
 
+def _render_wide_frame(t: float, mx: float, mz: float) -> np.ndarray:
+    """Top/wide grayscale view: x is vertical, z is horizontal."""
+    yy, xx = np.indices((WIDE_HEIGHT, WIDE_WIDTH), dtype=np.float32)
+    # Map z across left/right and x across up/down over a wider apparent field.
+    gx = xx + (50.0 - mz) * 55.0
+    gy = yy + (50.0 - mx) * 38.0
+    base = 95 + 35 * np.sin(gx / 380.0) + 30 * np.cos(gy / 260.0)
+    tile_x = np.floor(gx / 180).astype(np.int32)
+    tile_y = np.floor(gy / 140).astype(np.int32)
+    base += 45 * (_hash01(tile_x, tile_y, 21) - 0.5)
+
+    # Holder/sample-tray style grid lines and a few fiducials.
+    grid_x = np.minimum(gx % 120, 120 - (gx % 120)) < 2
+    grid_y = np.minimum(gy % 90, 90 - (gy % 90)) < 2
+    img = np.where(grid_x | grid_y, base * 0.55, base)
+    for cx, cy, amp, sig in ((320, 180, 90, 18), (120, 80, 70, 12), (510, 275, 65, 16)):
+        img += np.exp(-(((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * sig ** 2))) * amp
+    return np.clip(img, 0, 255).astype(np.uint8)
+
+
 class CamGroup(PVGroup):
     color_mode = pvproperty(
         value="RGB1",   # data layout we publish is pixel-interleaved (R,G,B per pixel)
@@ -218,9 +242,52 @@ class ImageGroup(PVGroup):
             await async_lib.sleep(1.0 / FRAME_RATE_HZ)
 
 
+class WideCamGroup(PVGroup):
+    color_mode = pvproperty(value="Mono", name="ColorMode_RBV", dtype=ChannelType.STRING, read_only=True)
+    array_size_x = pvproperty(value=WIDE_WIDTH, name="ArraySizeX_RBV", dtype=ChannelType.LONG, read_only=True)
+    array_size_y = pvproperty(value=WIDE_HEIGHT, name="ArraySizeY_RBV", dtype=ChannelType.LONG, read_only=True)
+    array_size_z = pvproperty(value=WIDE_DEPTH, name="ArraySizeZ_RBV", dtype=ChannelType.LONG, read_only=True)
+    acquire_time = pvproperty(value=0.05, name="AcquireTime", dtype=ChannelType.DOUBLE)
+    acquire_time_rbv = pvproperty(value=0.05, name="AcquireTime_RBV", dtype=ChannelType.DOUBLE, read_only=True)
+
+    @acquire_time.putter
+    async def acquire_time(self, instance, value):
+        await self.acquire_time_rbv.write(float(value))
+
+
+class WideImageGroup(PVGroup):
+    array_size0 = pvproperty(value=WIDE_DEPTH, name="ArraySize0_RBV", dtype=ChannelType.LONG, read_only=True)
+    array_size1 = pvproperty(value=WIDE_WIDTH, name="ArraySize1_RBV", dtype=ChannelType.LONG, read_only=True)
+    array_size2 = pvproperty(value=WIDE_HEIGHT, name="ArraySize2_RBV", dtype=ChannelType.LONG, read_only=True)
+    array_data = pvproperty(
+        value=[0] * (WIDE_WIDTH * WIDE_HEIGHT * WIDE_DEPTH),
+        name="ArrayData",
+        dtype=ChannelType.CHAR,
+        max_length=WIDE_WIDTH * WIDE_HEIGHT * WIDE_DEPTH,
+        read_only=True,
+    )
+
+    @array_data.startup
+    async def array_data(self, instance, async_lib):
+        parent = self.parent
+        t0 = 0.0
+        while True:
+            try:
+                mx = float(parent.pzX.motor.field_inst.user_readback_value.value)
+                mz = float(parent.pzZ.motor.field_inst.user_readback_value.value)
+            except Exception:
+                mx = mz = 0.0
+            frame = _render_wide_frame(t0, mx, mz)
+            await instance.write(frame.ravel().astype(np.uint8))
+            t0 += 1.0 / FRAME_RATE_HZ
+            await async_lib.sleep(1.0 / FRAME_RATE_HZ)
+
+
 class SwaxsSimIOC(PVGroup):
     cam = SubGroup(CamGroup, prefix="cam1:")
     image = SubGroup(ImageGroup, prefix="image1:")
+    widecam = SubGroup(WideCamGroup, prefix="widecam1:")
+    wideimage = SubGroup(WideImageGroup, prefix="wideimage1:")
     # --- piezo fine stage (top of the stack): x/y/z/th/chi ---
     pzX = SubGroup(FakeMotor, velocity=2.0, precision=4, user_limits=(-50.0, 50.0), prefix="pzX")
     pzY = SubGroup(FakeMotor, velocity=2.0, precision=4, user_limits=(-50.0, 50.0), prefix="pzY")

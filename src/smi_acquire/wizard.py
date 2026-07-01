@@ -25,7 +25,7 @@ renderer and every transition is unit-testable.  It reuses :mod:`smi_acquire.int
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from . import interview, registry
 from .project import Experiment, Target
@@ -119,6 +119,7 @@ class WizardState:
     reads: List[str] = field(default_factory=lambda: ["energy", "waxs", "xbpm2", "xbpm3"])
     project_name: str = ""
     scan_name: str = ""
+    name_spec: Dict[str, object] = field(default_factory=dict)
 
     # step 1 — apparatus (filled when relevant)
     align_routine: Optional[str] = None
@@ -226,6 +227,7 @@ class WizardState:
         return ExperimentSpec(
             project_name=self.project_name,
             scan_name=self.suggested_scan_name(),
+            name_spec=dict(self.name_spec),
             beam=self.beam_spec(),
             apparatus=self.apparatus_spec(),
             axes=list(self.axes),
@@ -250,6 +252,7 @@ class WizardState:
         exp.axes = list(spec.axes)
         exp.scan_name = spec.scan_name
         exp.project_name = self.project_name
+        exp.name_spec = dict(self.name_spec)
         exp.target = self.target()
 
     # ---- construction from an existing Experiment (edit mode) -------------
@@ -264,6 +267,7 @@ class WizardState:
             reads=list(exp.beam.reads),
             scan_name=exp.scan_name,
             project_name=exp.project_name,
+            name_spec=dict(exp.name_spec),
             align_routine=exp.apparatus.align_routine,
             align_angle=exp.apparatus.align_angle,
             heater=exp.apparatus.heater,

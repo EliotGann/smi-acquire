@@ -188,8 +188,11 @@ class AcquireApp:
             if xyz is None:
                 continue
             x, y, z = xyz
+            holder = self.store.holder_by_id(s.holder_id) if s.holder_id else None
             entries.append(MBookmark(name=s.name, x=x, y=y, z=z, is_reference=False,
-                                     in_scan=s.name in ticked))
+                                     in_scan=s.name in ticked,
+                                     holder=holder.name if holder is not None else None,
+                                     sample_id=s.id))
         for r in self.project.references:
             if not r.visible:
                 continue
@@ -197,6 +200,8 @@ class AcquireApp:
             entries.append(MBookmark(name=r.name, x=x, y=y, z=z, is_reference=True))
         try:
             inter.set_samples(entries)
+            if hasattr(self.micro, "wide"):
+                self.micro.wide.set_samples(entries)
         except Exception:
             pass
 
@@ -263,15 +268,16 @@ class AcquireApp:
         goto = pn.widgets.Button(name="→ go to position", width=150)
         goto.on_click(self._on_goto_selected)
 
-        # Run-order (priority) controls: the list is always shown in run order (lowest
-        # priority first). ▲/▼ move the selected sample one step; "renumber" normalizes to
-        # 1..N in the current order.
+        # Run-order (priority) controls: ▲/▼ move in the displayed order; "set priority from
+        # shown order" persists whatever order the user currently sees (including table sorts).
         pri_up = pn.widgets.Button(name="▲ up", width=70)
         pri_up.on_click(lambda _e: self._on_priority_move(-1))
         pri_down = pn.widgets.Button(name="▼ down", width=80)
         pri_down.on_click(lambda _e: self._on_priority_move(+1))
-        pri_renum = pn.widgets.Button(name="⇅ renumber 1..N", width=150)
+        pri_renum = pn.widgets.Button(name="⇅ priority = shown order", width=190)
         pri_renum.on_click(lambda _e: self._on_priority_renumber())
+        refresh = pn.widgets.Button(name="↻ refresh", width=90)
+        refresh.on_click(lambda _e: self.refresh_spine())
 
         # Holders sub-panel (replaces the old "Sets").
         new_holder = pn.widgets.TextInput(placeholder="new holder name…", width=130)
@@ -285,6 +291,21 @@ class AcquireApp:
                                                    width=180)
         holder_project_btn = pn.widgets.Button(name="→ set holder's project", width=170)
         holder_project_btn.on_click(self._on_set_holder_project)
+        rm_holder = pn.widgets.Button(name="remove holder", button_type="danger", width=120)
+        rm_holder.on_click(lambda _e: self._on_remove_holder(delete_samples=False))
+        clear_holders = pn.widgets.Button(name="clear holders", button_type="danger", width=120)
+        clear_holders.on_click(lambda _e: self._on_clear_holders())
+
+        self.adjust_axis = pn.widgets.Select(name="axis", options={
+            "piezo x": "piezo_x", "piezo y": "piezo_y", "piezo z": "piezo_z",
+            "huber x": "stage_x", "huber y": "stage_y", "huber z": "stage_z",
+        }, width=115)
+        self.adjust_mode = pn.widgets.RadioButtonGroup(options={"+ relative": "relative", "= absolute": "absolute"},
+                                                       value="relative", width=175)
+        self.adjust_value = pn.widgets.FloatInput(name="value", value=0.0, step=0.1, width=95)
+        self.adjust_clear_refined = pn.widgets.Checkbox(name="clear refined", value=False, width=120)
+        adjust_btn = pn.widgets.Button(name="apply to selected", button_type="warning", width=145)
+        adjust_btn.on_click(self._on_adjust_positions)
 
         imp = pn.widgets.FileInput(accept=".csv", name="import")
         imp.param.watch(self._on_import_csv, "value")
@@ -311,20 +332,31 @@ class AcquireApp:
             self.spine_count,
             self.spine,
             pn.Row(add, rm),
-            pn.Row(load, goto),
+            pn.Row(load, goto, refresh),
             pn.Row(pri_up, pri_down, pri_renum),
             pn.pane.Markdown(
                 "<span style='color:#777;font-size:11px'>The list is shown in <b>run order</b> "
                 "(<b>pri</b> column, lowest first); <b>▲/▼</b> move the selected sample, "
-                "<b>renumber</b> normalizes to 1..N (or edit <b>pri</b> directly). Tick <b>scan</b> "
+                "<b>priority = shown order</b> writes priorities from the current displayed table "
+                "order. Tick <b>scan</b> "
                 "to include a sample as a Scan-tab target; <b>ref</b> marks a reference landmark "
                 "(never scanned). <b>go to position</b> moves the stage to the selected row.</span>"),
             self.sample_detail,
+            pn.layout.Divider(),
+            pn.pane.Markdown("**Adjust nominal positions**"),
+            pn.Row(self.adjust_axis, self.adjust_value),
+            pn.Row(self.adjust_mode, self.adjust_clear_refined),
+            pn.Row(adjust_btn),
+            pn.pane.Markdown(
+                "<span style='color:#777;font-size:11px'>Applies only to selected samples' "
+                "<b>nominal</b> positions. Refined positions are not changed; clear them if the "
+                "nominal shift invalidates alignment.</span>"),
             pn.layout.Divider(),
             pn.pane.Markdown("**Holders**"),
             pn.Row(new_holder, mk_holder),
             pn.Row(self.move_holder, move_btn),
             pn.Row(self.holder_project, holder_project_btn),
+            pn.Row(rm_holder, clear_holders),
             pn.layout.Divider(),
             pn.pane.Markdown("**Import / export**"),
             pn.Row(imp),
@@ -430,7 +462,10 @@ class AcquireApp:
 
 
     def refresh_spine(self):
+        selected = set(self._selected_rows()) if getattr(self, "_spine_rows", None) else set()
         self.spine.value = self._spine_df()
+        if selected:
+            self.spine.selection = [i for i, row in enumerate(self._spine_rows) if row in selected]
         self.move_holder.options = self._holder_options()
         if hasattr(self, "capture_holder"):
             self.capture_holder.options = self._holder_options()
@@ -440,6 +475,13 @@ class AcquireApp:
         if hasattr(self, "target_select"):
             self.target_select.options = self._target_options()
         self.sync_markers()
+
+    def _poll_store_refresh(self):
+        """Refresh the master list from the shared store so external Redis edits appear promptly."""
+        try:
+            self.refresh_spine()
+        except Exception:
+            pass
 
     def _refresh_store_status(self):
         if self.store.live:
@@ -688,15 +730,38 @@ class AcquireApp:
             self.spine.selection = [idx]
 
     def _on_priority_renumber(self):
-        """Normalize every sample's priority to a dense 1..N in the current run order."""
-        ordered = sorted(self.store.list_samples(), key=self._sample_priority)
-        changed = 0
+        """Set priorities to the currently displayed sample order (including UI sorts)."""
+        ordered = self._displayed_samples()
         for n, s in enumerate(ordered, start=1):
             if self._sample_priority(s) != n:
                 self._set_sample_priority(s, n)
-                changed += 1
         self.refresh_spine()
-        _toast("renumbered {} sample(s) 1..{}".format(len(ordered), len(ordered)))
+        _toast("set priority from displayed order for {} sample(s)".format(len(ordered)))
+
+    def _displayed_samples(self):
+        """Samples in the order currently shown by Tabulator, falling back to spine rows."""
+        by_name = {}
+        for s in self.store.list_samples():
+            by_name.setdefault(s.name, []).append(s)
+        ordered = []
+        try:
+            view = getattr(self.spine, "current_view", None)
+            names = list((view if view is not None else self.spine.value).get("name", []))
+        except Exception:
+            names = []
+        for name in names:
+            bucket = by_name.get(str(name), [])
+            if bucket:
+                ordered.append(bucket.pop(0))
+        if ordered:
+            return ordered
+        out = []
+        for kind, rid in self._spine_rows:
+            if kind == "sample":
+                s = self.store.sample_by_id(rid)
+                if s is not None:
+                    out.append(s)
+        return out
 
     # ---- per-sample project_name ----------------------------------------
     def _set_sample_project(self, sample, value, *, refresh=False):
@@ -727,6 +792,45 @@ class AcquireApp:
         self.refresh_spine()
         _toast("set project '{}' on {} sample(s) in holder '{}'".format(
             name or "(cleared)", len(members), holder.name if holder else "?"))
+
+    def _on_adjust_positions(self, _e):
+        samples = self._selected_samples()
+        if not samples:
+            _toast("select one or more samples to adjust", "warning")
+            return
+        if any(s.refined is not None for s in samples) and not self.adjust_clear_refined.value:
+            _toast("selected sample(s) have refined positions; nominal will change but refined will remain", "warning")
+        n = self.store.adjust_nominal_axis(
+            [s.id for s in samples], self.adjust_axis.value, float(self.adjust_value.value),
+            mode=self.adjust_mode.value, clear_refined=bool(self.adjust_clear_refined.value))
+        self.refresh_spine()
+        _toast("adjusted nominal {} on {} sample(s)".format(self.adjust_axis.value, n))
+
+    def _on_remove_holder(self, *, delete_samples=False):
+        hid = self.move_holder.value
+        if not hid:
+            s = self._selected_sample()
+            hid = s.holder_id if s is not None else None
+        if not hid:
+            _toast("pick a holder or select a sample on one", "warning")
+            return
+        holder = self.store.holder_by_id(hid)
+        name = holder.name if holder is not None else "?"
+        members = self.store.list_samples(holder_id=hid)
+        deleted = self.store.delete_holder(hid, delete_samples=delete_samples)
+        self.refresh_spine()
+        action = "removed holder '{}'".format(name)
+        if delete_samples:
+            action += " and deleted {} sample(s)".format(deleted)
+        else:
+            action += "; detached {} sample(s)".format(len(members))
+        _toast(action)
+
+    def _on_clear_holders(self):
+        count = len(self.store.list_holders())
+        self.store.clear_holders(delete_samples=False)
+        self.refresh_spine()
+        _toast("cleared {} holder(s); samples were detached".format(count))
 
     def _edit_reference(self, ref_id, col, val):
         """Apply an inline edit to a reference row (only its name is editable here)."""
@@ -982,6 +1086,8 @@ class AcquireApp:
             pn.state.add_periodic_callback(self._refresh_interlock, period=650)
             # Refresh the read-only proposal occasionally (changes when staff set a new proposal).
             pn.state.add_periodic_callback(self._refresh_proposal_status, period=5000)
+            # Treat the Redis/offline sample store as two-way; reflect external edits promptly.
+            pn.state.add_periodic_callback(self._poll_store_refresh, period=2000)
             self.micro_box.clear()
             self.micro_box.append(ui.layout)
             self.sync_markers()
@@ -1166,6 +1272,7 @@ class AcquireApp:
         scan = pn.widgets.TextInput(name="Scan name (optional)", value=st.scan_name, width=220)
         scan.param.watch(lambda e: self._wiz_assign("scan_name", e.new), "value")
         col.append(pn.Row(exp, proj, scan))
+        col.append(self._wiz_naming_card())
 
         # Reflection-only: alignment in setup
         if st.geometry == "reflection":
@@ -1193,6 +1300,56 @@ class AcquireApp:
         col.append(pn.Card(reads, atts, title="Advanced (reads / attenuators)",
                            collapsed=True, sizing_mode="stretch_width"))
         return col
+
+    def _wiz_naming_card(self):
+        st = self.wizard
+        spec = dict(st.name_spec or {})
+        prefix = pn.widgets.TextInput(name="prefix", value=str(spec.get("name_prefix", "")), width=160)
+        include_energy = pn.widgets.Checkbox(name="energy", value=bool(spec.get("include_energy", True)))
+        include_arc = pn.widgets.Checkbox(name="WAXS arc", value=bool(spec.get("include_arc", True)))
+        include_incidence = pn.widgets.Checkbox(name="incidence", value=bool(spec.get("include_incidence", False)))
+        arc_fmt = pn.widgets.TextInput(name="arc format", value=str(spec.get("arc_fmt", "wa{:04.1f}")), width=130)
+        extra = pn.widgets.TextInput(name="extra tokens", value=" ".join(spec.get("extra_tokens", []) or []),
+                                     placeholder="px_{piezo_x:.1f} py_{piezo_y:.1f}", width=320)
+        preview = pn.pane.Markdown("")
+
+        def _apply(_e=None):
+            toks = [t for t in str(extra.value or "").split() if t]
+            ns = {
+                "name_prefix": prefix.value.strip(),
+                "include_energy": bool(include_energy.value),
+                "include_arc": bool(include_arc.value),
+                "include_incidence": bool(include_incidence.value),
+                "arc_fmt": arc_fmt.value or "wa{:04.1f}",
+            }
+            if toks:
+                ns["extra_tokens"] = toks
+            # Drop defaults/empty prefix to keep generated scripts thin.
+            if not ns["name_prefix"]:
+                ns.pop("name_prefix")
+            st.name_spec = ns
+            preview.object = self._naming_preview(ns)
+
+        for w in (prefix, include_energy, include_arc, include_incidence, arc_fmt, extra):
+            w.param.watch(_apply, "value")
+        _apply()
+        return pn.Card(
+            pn.pane.Markdown("Use recorded data-key tokens only. Common tokens: `{energy_energy}`, "
+                             "`{waxs_arc}`, `{incident_angle}`, `{piezo_x}`, `{piezo_y}`, `{stage_phi}`."),
+            pn.Row(prefix, arc_fmt),
+            pn.Row(include_energy, include_arc, include_incidence),
+            extra,
+            preview,
+            title="Advanced naming helper", collapsed=True, sizing_mode="stretch_width")
+
+    @staticmethod
+    def _naming_preview(name_spec):
+        try:
+            from smi_plans import preview_bar_name
+            template = preview_bar_name("sample", name_spec=name_spec, printer=None)
+            return "template: `{}`".format(template)
+        except Exception as exc:
+            return "preview unavailable: `{}`".format(exc)
 
     def _wiz_set_geometry(self, value):
         self.wizard.geometry = value

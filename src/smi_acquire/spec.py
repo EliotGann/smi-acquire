@@ -180,6 +180,7 @@ class ExperimentSpec:
     version: int = SPEC_VERSION
     project_name: str = ""
     scan_name: str = "acquire"
+    name_spec: Dict[str, Any] = field(default_factory=dict)
     md: Dict[str, Any] = field(default_factory=dict)
 
     beam: BeamSpec = field(default_factory=BeamSpec)
@@ -204,6 +205,7 @@ class ExperimentSpec:
             version=d.get("version", SPEC_VERSION),
             project_name=d.get("project_name", ""),
             scan_name=d.get("scan_name", "acquire"),
+            name_spec=dict(d.get("name_spec", {}) or {}),
             md=dict(d.get("md", {})),
             beam=beam, apparatus=appa, axes=axes,
             manual_setup=manual, samples=samples,

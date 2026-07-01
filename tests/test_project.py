@@ -70,6 +70,28 @@ def test_move_sample_between_holders():
     assert {s.name for s in acq.list_samples(holder_id=cold.id)} == {"A", "B"}
 
 
+def test_delete_holder_detaches_samples_by_default():
+    acq = _demo_store()
+    hot = acq.holder_by_name("hot")
+    deleted = acq.delete_holder(hot.id)
+    assert deleted == 0
+    assert acq.holder_by_name("hot") is None
+    assert {s.name for s in acq.list_samples()} == {"A", "B", "C"}
+    assert all(s.holder_id != hot.id for s in acq.list_samples())
+
+
+def test_adjust_nominal_axis_can_clear_refined():
+    acq = AcquireStore.connect(offline=True)
+    s = acq.add_sample("S1", nominal=Position(frame="holder", piezo_x=1.0))
+    s.refined = Position(frame="holder", piezo_x=10.0)
+    acq.update_sample(s)
+    n = acq.adjust_nominal_axis([s.id], "piezo_x", 2.5, mode="relative", clear_refined=True)
+    got = acq.sample_by_id(s.id)
+    assert n == 1
+    assert got.nominal.piezo_x == 3.5
+    assert got.refined is None
+
+
 # ---------------------------------------------------------------------------
 # experiments target holders (resolved against the store)
 # ---------------------------------------------------------------------------

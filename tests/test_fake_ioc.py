@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from smi_acquire.sim.fake_ioc import _render_frame
+from smi_acquire.sim.fake_ioc import _render_frame, _render_wide_frame
 
 
 def test_fake_camera_field_changes_with_motor_motion():
@@ -29,3 +29,11 @@ def test_fake_camera_has_local_features_for_alignment():
     gray = img.mean(axis=2)
     assert gray.std() > 25.0
     assert gray.max() - gray.min() > 100.0
+
+
+def test_fake_wide_camera_is_grayscale_and_moves_with_xz():
+    a = _render_wide_frame(0.0, 0.0, 0.0)
+    b = _render_wide_frame(0.0, 1.0, 2.0)
+    assert a.shape == (360, 640)
+    assert b.shape == a.shape
+    assert np.mean(np.abs(a.astype(float) - b.astype(float))) > 5.0

@@ -2349,19 +2349,29 @@ packages:
 - pypi: ../smi-plans
   name: smi-plans
   version: 0.1.0
-  sha256: f754b76aa5c559b62337e3a221702a8fa751d2f300d93835a8614a3ae5f1eea9
+  sha256: 517c530d0de087e99fae326df6a969c6bb438aecedd44e4fb6796ec6b9d8f7b9
   requires_dist:
   - bluesky ; extra == 'beamline'
   - ophyd ; extra == 'beamline'
   - numpy ; extra == 'beamline'
+  - numpy ; extra == 'analysis'
+  - scipy ; extra == 'analysis'
+  - bokeh ; extra == 'analysis'
+  - pandas ; extra == 'analysis'
   - pytest ; extra == 'test'
   - bluesky ; extra == 'test'
   - ophyd ; extra == 'test'
   - numpy ; extra == 'test'
+  - scipy ; extra == 'test'
+  - bokeh ; extra == 'test'
+  - pandas ; extra == 'test'
   - pytest ; extra == 'dev'
   - bluesky ; extra == 'dev'
   - ophyd ; extra == 'dev'
   - numpy ; extra == 'dev'
+  - scipy ; extra == 'dev'
+  - bokeh ; extra == 'dev'
+  - pandas ; extra == 'dev'
   - ruff ; extra == 'dev'
   requires_python: '>=3.7'
 - conda: https://conda.anaconda.org/conda-forge/linux-64/snappy-1.2.2-h03e3b7b_1.conda

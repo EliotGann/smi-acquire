@@ -139,6 +139,7 @@ class Experiment:
     id: str = field(default_factory=_new_id)
     scan_name: str = "acquire"
     project_name: str = ""          # -> md={'project_name': ...} on the acquire run(s)
+    name_spec: Dict[str, Any] = field(default_factory=dict)
     beam: BeamSpec = field(default_factory=BeamSpec)
     apparatus: ApparatusSpec = field(default_factory=ApparatusSpec)
     axes: List[AxisSpec] = field(default_factory=list)
@@ -151,6 +152,7 @@ class Experiment:
         return {
             "name": self.name, "id": self.id, "scan_name": self.scan_name,
             "project_name": self.project_name,
+            "name_spec": dict(self.name_spec),
             "beam": asdict(self.beam), "apparatus": asdict(self.apparatus),
             "axes": [asdict(a) for a in self.axes],
             "manual_setup": [asdict(m) for m in self.manual_setup],
@@ -165,6 +167,7 @@ class Experiment:
             id=d.get("id", _new_id()),
             scan_name=d.get("scan_name", "acquire"),
             project_name=d.get("project_name", ""),
+            name_spec=dict(d.get("name_spec", {}) or {}),
             beam=BeamSpec(**d.get("beam", {})) if d.get("beam") else BeamSpec(),
             apparatus=(ApparatusSpec(**d["apparatus"]) if d.get("apparatus")
                        else ApparatusSpec()),
@@ -195,7 +198,7 @@ class Experiment:
         source = "holder" if (holder_name and samples) else "inline"
         return ExperimentSpec(
             project_name=default_project,
-            scan_name=self.scan_name, md=dict(self.md),
+            scan_name=self.scan_name, name_spec=dict(self.name_spec), md=dict(self.md),
             beam=self.beam, apparatus=self.apparatus, axes=self.axes,
             manual_setup=self.manual_setup,
             samples=SamplesSpec(rows=rows, motor_object=motor_object,
@@ -209,6 +212,7 @@ class Experiment:
         """Adopt a scan recipe authored as an ExperimentSpec (e.g. the interrogation seed)."""
         return cls(
             name=name, scan_name=spec.scan_name, project_name=spec.project_name,
+            name_spec=dict(spec.name_spec),
             beam=spec.beam, apparatus=spec.apparatus,
             axes=list(spec.axes), manual_setup=list(spec.manual_setup),
             target=target or Target(), md=dict(spec.md),

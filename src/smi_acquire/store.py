@@ -126,6 +126,41 @@ class AcquireStore:
             h.name = new_name.strip()
             self.store.put_holder(h)
 
+    def delete_holder(self, holder_id: str, *, delete_samples: bool = False) -> int:
+        """Remove a holder from the magazine, optionally deleting its samples.
+
+        Returns the number of samples deleted.  When ``delete_samples`` is false, samples are
+        retained but detached from the holder.
+        """
+        h = self.holder_by_id(holder_id)
+        if h is None:
+            return 0
+        deleted = 0
+        for sid in list(h.sample_ids):
+            if delete_samples:
+                self.store.delete_sample(sid)
+                deleted += 1
+            else:
+                s = self.sample_by_id(sid)
+                if s is not None:
+                    s.holder_id = ""
+                    self.store.put_sample(s)
+        try:
+            self.store.prune(holders=[holder_id], require_export=False)
+        except AttributeError:
+            m = self.store.magazine()
+            if holder_id in m.holder_ids:
+                m.holder_ids.remove(holder_id)
+                self.store._put_magazine(m)  # noqa: SLF001
+        return deleted
+
+    def clear_holders(self, *, delete_samples: bool = False) -> int:
+        """Remove all holders, optionally deleting samples on them."""
+        deleted = 0
+        for h in list(self.list_holders()):
+            deleted += self.delete_holder(h.id, delete_samples=delete_samples)
+        return deleted
+
     def _register_holder_in_magazine(self, holder: Holder) -> None:
         m = self.store.magazine()
         if holder.id not in m.holder_ids:
@@ -195,6 +230,33 @@ class AcquireStore:
             s.nominal = nominal
             self.store.put_sample(s)
         return s
+
+    def adjust_nominal_axis(self, sample_ids: List[str], axis: str, value: float, *, mode: str,
+                            clear_refined: bool = False) -> int:
+        """Bulk-adjust one nominal Position axis for selected samples.
+
+        ``mode`` is ``"relative"`` (add value) or ``"absolute"`` (set value). Refined positions
+        are intentionally not adjusted; callers may clear them explicitly.
+        """
+        if axis not in PIEZO_AXES + STAGE_AXES:
+            raise ValueError("unknown position axis: {}".format(axis))
+        n = 0
+        for sid in sample_ids:
+            s = self.sample_by_id(sid)
+            if s is None:
+                continue
+            cur = getattr(s.nominal, axis)
+            if mode == "relative":
+                setattr(s.nominal, axis, (float(cur) if cur is not None else 0.0) + float(value))
+            elif mode == "absolute":
+                setattr(s.nominal, axis, float(value))
+            else:
+                raise ValueError("mode must be 'relative' or 'absolute'")
+            if clear_refined:
+                s.refined = None
+            self.store.put_sample(s)
+            n += 1
+        return n
 
     def _add_sample_to_holder(self, holder: Holder, sample_id: str) -> None:
         if sample_id not in holder.sample_ids:

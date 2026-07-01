@@ -151,6 +151,11 @@ class MosaicBackground:
         self._tiles.clear()
         self._redraw()
 
+    @property
+    def active(self) -> bool:
+        """True when cached map imagery is visible and can provide off-frame context."""
+        return bool(self.enabled.value and self._tiles)
+
     def map_grid(self) -> None:
         """Synchronous small-grid mapper. Keeps UI simple; intended for dev/local use."""
         if self._mapping:

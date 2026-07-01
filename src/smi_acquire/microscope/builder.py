@@ -28,6 +28,8 @@ from bokeh.events import Tap
 from bokeh.models import ColumnDataSource, CustomJS, Div
 from bokeh.plotting import figure
 
+from smi_acquire.config_store import AcquireConfigStore
+
 from .calibration import CalibrationModel
 from .camera_stream import CameraStream, placeholder_image
 from .config import AppConfig, load_config
@@ -45,6 +47,7 @@ from .widgets.exposure import ExposureControl
 from .widgets.motor_panel import MotorPanel
 from .widgets.script_panel import ScriptPanel
 from .widgets.status_bar import StatusBar
+from .wide_view import WideCameraView
 log = logging.getLogger(__name__)
 
 
@@ -105,6 +108,7 @@ class MicroscopeUI:
     interactive: InteractiveMode          # the bookmark store (sample positions live here)
     stage: SampleStage
     camera: Camera
+    wide: WideCameraView
     cfg: AppConfig
     capture_slot: pn.Column               # host fills this with capture-position controls
     _periodic: List[tuple]                # (callback, period_ms)
@@ -171,6 +175,7 @@ def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=N
     and unguarded camera writes (standalone use).
     """
     cfg = cfg or load_config()
+    config_store = AcquireConfigStore.connect()
     camera = Camera.from_config(cfg.epics, name="microscope")
     stage = SampleStage.from_config(cfg.epics, name="stage")
     for dev, label in ((camera, "camera"), (stage, "stage")):
@@ -194,21 +199,24 @@ def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=N
     huber_calibration = CalibrationModel(cfg.calibration.huber_matrix)
 
     motor_panel = MotorPanel(stage, cfg, executor=executor)
-    beam_panel = BeamPanel(cfg, beam_overlay)
+    beam_panel = BeamPanel(cfg, beam_overlay, config_store=config_store)
     status_bar = StatusBar(camera, stage)
     exposure = ExposureControl(camera, interlock=interlock)
 
     def dims():
         return (stream.current_dims().width, stream.current_dims().height)
     interactive = InteractiveMode(fig, stage, beam_overlay, calibration, cfg, dims,
-                                  executor=executor, huber_calibration=huber_calibration)
+                                  executor=executor, huber_calibration=huber_calibration,
+                                  map_active_provider=lambda: mosaic.active)
     polygon = AreaMode(fig, stage, beam_overlay, calibration, cfg, dims, bookmark_store=interactive)
     square = SquareScanMode(fig, stage, beam_overlay, calibration, cfg, dims, bookmark_store=interactive)
     linear = LinearScanMode(fig, stage, beam_overlay, calibration, cfg, dims, bookmark_store=interactive)
     focus = FocusMode(fig, stage, beam_overlay, calibration, cfg, dims, camera_stream=stream,
                       interlock=interlock)
     calibrate = CalibrateMode(fig, stage, beam_overlay, calibration, cfg, dims,
-                              camera_stream=stream, huber_calibration=huber_calibration)
+                              camera_stream=stream, huber_calibration=huber_calibration,
+                              config_store=config_store)
+    wide = WideCameraView(cfg, stage, executor=executor)
     modes = (interactive, polygon, square, linear, focus, calibrate)
 
     script_panel = ScriptPanel([interactive, square, polygon, linear])
@@ -264,7 +272,7 @@ def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=N
         interactive.move_panel,
         sizing_mode="stretch_width",
     )
-    main_tabs = pn.Tabs((interactive.name, move_tab), ("Scan", scan_tabs),
+    main_tabs = pn.Tabs((interactive.name, move_tab), ("Wide", wide.panel), ("Scan", scan_tabs),
                         (focus.name, focus.panel), ("Setup", setup_tabs), dynamic=False)
 
     def _resolve():
@@ -272,8 +280,10 @@ def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=N
         if top == 0:
             return interactive
         if top == 1:
-            return (square, polygon, linear)[scan_tabs.active]
+            return wide
         if top == 2:
+            return (square, polygon, linear)[scan_tabs.active]
+        if top == 3:
             return focus
         return calibrate if setup_tabs.active == 0 else state["active"]
 
@@ -301,6 +311,7 @@ def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=N
     interval_ms = max(1, int(1000.0 / cfg.ui.poll_hz))
     periodic = [
         (stream.tick, interval_ms),
+        (wide.tick, interval_ms),
         (mosaic.tick, 1000),
         (motor_panel.refresh_readbacks, 500),
         (status_bar.refresh, 1000),
@@ -323,7 +334,8 @@ def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=N
         status_bar.view,
     )
     return MicroscopeUI(layout=layout, interactive=interactive, stage=stage,
-                        camera=camera, cfg=cfg, capture_slot=capture_slot, _periodic=periodic)
+                        camera=camera, wide=wide, cfg=cfg, capture_slot=capture_slot,
+                        _periodic=periodic)
 
 
 __all__ = ["MicroscopeUI", "build_microscope"]

@@ -28,9 +28,11 @@ from ..config import AppConfig
 from ..devices import SampleStage
 from ..overlays import BeamOverlay
 from ..scripts import Bookmark, bookmark_list_scan_snippet
+from ..wide_view import _alpha_for_distance
 
 # A second click within this many pixels of the first commits; further away starts a new preview.
 _COMMIT_TOLERANCE_PX = 20.0
+_PLANE_EPS = 1e-3
 
 # Click-placed scan points are auto-named pos1, pos2, … — this matches (and only) those, so
 # "Clear placed points" can remove them without touching user-named bookmarks.
@@ -61,6 +63,7 @@ class InteractiveMode:
         image_size_hint_provider,
         executor=None,
         huber_calibration: "CalibrationModel | None" = None,
+        map_active_provider=None,
     ) -> None:
         self.fig = fig
         self.stage = stage
@@ -70,6 +73,7 @@ class InteractiveMode:
         self.cfg = cfg
         self._dims = image_size_hint_provider
         self.executor = executor
+        self._map_active_provider = map_active_provider or (lambda: False)
         # Which stack click-to-move drives: "piezo" (fast/precise default) or "huber" (coarse
         # range extender). The piezo rides on the Huber, so each calibration is fit at a given
         # Huber orientation (rotation coupling handled in the deferred 6d work).
@@ -109,15 +113,22 @@ class InteractiveMode:
 
         # Two marker layers: regular sample bookmarks (lime circles) vs config references
         # (yellow diamonds) so they're visually distinguishable on the image.
-        self._markers_cds = ColumnDataSource(data={"x": [], "y": [], "name": []})
-        self._ref_markers_cds = ColumnDataSource(data={"x": [], "y": [], "name": []})
+        self._markers_cds = ColumnDataSource(data={"x": [], "y": [], "name": [], "alpha": []})
+        self._ref_markers_cds = ColumnDataSource(data={"x": [], "y": [], "name": [], "alpha": []})
+        self._oop_cds = ColumnDataSource(data={"x": [], "y": [], "marker": [], "alpha": [], "color": []})
         self._marker_renderer = fig.scatter(
             "x", "y", source=self._markers_cds, marker="circle",
-            size=14, fill_color="lime", fill_alpha=0.5, line_color="lime", line_width=2,
+            size=14, fill_color="lime", fill_alpha="alpha", line_color="lime",
+            line_alpha="alpha", line_width=2,
         )
         self._ref_marker_renderer = fig.scatter(
             "x", "y", source=self._ref_markers_cds, marker="diamond",
-            size=16, fill_color="yellow", fill_alpha=0.5, line_color="yellow", line_width=2,
+            size=16, fill_color="yellow", fill_alpha="alpha", line_color="yellow",
+            line_alpha="alpha", line_width=2,
+        )
+        self._oop_renderer = fig.scatter(
+            "x", "y", marker="marker", source=self._oop_cds, size=12,
+            fill_color="color", fill_alpha="alpha", line_color="color", line_alpha="alpha",
         )
         self._label_set = LabelSet(
             x="x", y="y", text="name", source=self._markers_cds,
@@ -131,6 +142,7 @@ class InteractiveMode:
         fig.add_layout(self._ref_label_set)
         self._marker_renderer.visible = False
         self._ref_marker_renderer.visible = False
+        self._oop_renderer.visible = False
         self._label_set.visible = False
         self._ref_label_set.visible = False
 
@@ -181,6 +193,7 @@ class InteractiveMode:
         self._active = True
         self._marker_renderer.visible = True
         self._ref_marker_renderer.visible = True
+        self._oop_renderer.visible = True
         self._label_set.visible = True
         self._ref_label_set.visible = True
         self._preview_renderer.visible = bool(self._pending)
@@ -215,8 +228,9 @@ class InteractiveMode:
         The sample list display itself is the host app's master list, not rebuilt here.
         """
         if not self._bookmarks:
-            self._markers_cds.data = {"x": [], "y": [], "name": []}
-            self._ref_markers_cds.data = {"x": [], "y": [], "name": []}
+            self._markers_cds.data = {"x": [], "y": [], "name": [], "alpha": []}
+            self._ref_markers_cds.data = {"x": [], "y": [], "name": [], "alpha": []}
+            self._oop_cds.data = {"x": [], "y": [], "marker": [], "alpha": [], "color": []}
             return
 
         try:
@@ -229,25 +243,50 @@ class InteractiveMode:
         reg_x: list[float] = []
         reg_y: list[float] = []
         reg_n: list[str] = []
+        reg_a: list[float] = []
         ref_x: list[float] = []
         ref_y: list[float] = []
         ref_n: list[str] = []
-        for bm, (mx_bm, my_bm, _) in zip(self._bookmarks, self._motor_at_bookmark):
+        ref_a: list[float] = []
+        oop_x: list[float] = []
+        oop_y: list[float] = []
+        oop_marker: list[str] = []
+        oop_alpha: list[float] = []
+        oop_color: list[str] = []
+        try:
+            z_now = float(self.stage.z.position)
+        except Exception:
+            z_now = 0.0
+        for bm, (mx_bm, my_bm, mz_bm) in zip(self._bookmarks, self._motor_at_bookmark):
             dp = self.calibration.motor_to_pixel_delta((m_now[0] - mx_bm, m_now[1] - my_bm))
             px = beam_px[0] + dp[0]
             py = beam_px[1] + dp[1]
-            if not _in_view(px, py, w, h):
+            if not self._map_active_provider() and not _in_view(px, py, w, h):
                 continue
+            alpha = _alpha_for_distance(z_now - mz_bm, 1.0)
+            dz = mz_bm - z_now
+            if abs(dz) > _PLANE_EPS:
+                oop_x.append(px + 14)
+                oop_y.append(py - 10 if dz > 0 else py + 10)
+                oop_marker.append("triangle" if dz > 0 else "inverted_triangle")
+                oop_alpha.append(max(alpha, 0.35))
+                oop_color.append("orange" if dz > 0 else "deepskyblue")
             if bm.is_reference:
                 ref_x.append(px)
                 ref_y.append(py)
                 ref_n.append(bm.name)
+                ref_a.append(alpha)
             else:
                 reg_x.append(px)
                 reg_y.append(py)
                 reg_n.append(bm.name)
-        self._markers_cds.data = {"x": reg_x, "y": reg_y, "name": reg_n}
-        self._ref_markers_cds.data = {"x": ref_x, "y": ref_y, "name": ref_n}
+                reg_a.append(alpha)
+        self._markers_cds.data = {"x": reg_x, "y": reg_y, "name": reg_n, "alpha": reg_a}
+        self._ref_markers_cds.data = {"x": ref_x, "y": ref_y, "name": ref_n, "alpha": ref_a}
+        self._oop_cds.data = {
+            "x": oop_x, "y": oop_y, "marker": oop_marker,
+            "alpha": oop_alpha, "color": oop_color,
+        }
 
     def tick_table(self) -> None:
         """No-op: this mode no longer owns a table (the master Sample list is the host's).

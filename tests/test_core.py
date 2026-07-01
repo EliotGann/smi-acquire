@@ -216,6 +216,19 @@ def test_codegen_named_energy_uses_resolve_list():
     ast.parse(src)
 
 
+def test_codegen_name_spec_uses_smi_plans_helpers():
+    sp = ExperimentSpec(
+        name_spec={"name_prefix": "Gao", "include_energy": False,
+                   "extra_tokens": ["px_{piezo_x:.1f}"]},
+        samples=SamplesSpec(rows=[{"name": "s1", "piezo_x": 1.0}]),
+    )
+    src = codegen.render(sp)
+    assert "from smi_plans import apply_name_prefix, bar_name_tokens, preview_bar_name" in src
+    assert "name_tokens = bar_name_tokens" in src
+    assert "apply_name_prefix" in src
+    ast.parse(src)
+
+
 def test_codegen_unnamed_energy_stays_literal():
     g = {"boundaries": [2470.0, 2472.0, 2476.0], "steps": [1.0, 0.25]}
     sp = ExperimentSpec(axes=[AxisSpec("energy", {"grid": g})])   # no list_name
@@ -430,4 +443,3 @@ def test_dryrun_arc_axis_uses_waxs_arc():
         pytest.skip("smi_plans not available")
     assert rep.ok, rep.error
     assert rep.events == 2
-

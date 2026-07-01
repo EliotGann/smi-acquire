@@ -89,6 +89,7 @@ class CalibrateMode:
         image_size_hint_provider,
         camera_stream: CameraStream,
         huber_calibration: "CalibrationModel | None" = None,
+        config_store=None,
     ) -> None:
         self.fig = fig
         self.stage = stage
@@ -98,6 +99,7 @@ class CalibrateMode:
         self.cfg = cfg
         self._dims = image_size_hint_provider
         self._stream = camera_stream
+        self.config_store = config_store
         self._active = False
         self._proposed: np.ndarray | None = None
         self._running = False
@@ -131,6 +133,12 @@ class CalibrateMode:
         self._accept_btn.on_click(self._on_accept)
         self._reject_btn = pn.widgets.Button(name="Reject", button_type="danger", width=100, disabled=True)
         self._reject_btn.on_click(self._on_reject)
+        self._save_config_btn = pn.widgets.Button(name="save to config", width=130)
+        self._save_config_btn.on_click(self._on_save_config)
+        self._load_store_btn = pn.widgets.Button(name="load from store", width=130)
+        self._load_store_btn.on_click(self._on_load_store)
+        self._save_store_btn = pn.widgets.Button(name="save to store", width=130)
+        self._save_store_btn.on_click(self._on_save_store)
 
         self._current_matrix_view = pn.pane.Markdown(self._fmt_matrix("current", self.calibration.matrix))
         self._proposed_matrix_view = pn.pane.Markdown("**proposed:** _run a calibration to populate_")
@@ -164,6 +172,8 @@ class CalibrateMode:
             self._status,
             self._progress,
             pn.Row(self._start_btn, self._accept_btn, self._reject_btn),
+            self._save_config_btn,
+            pn.Row(self._load_store_btn, self._save_store_btn),
             pn.layout.Divider(),
             self._current_matrix_view,
             self._proposed_matrix_view,
@@ -383,6 +393,56 @@ class CalibrateMode:
         self._accept_btn.disabled = True
         self._reject_btn.disabled = True
         self._proposed = None
+
+    def _sync_cfg_matrix(self, matrix) -> None:
+        if self._cal_stack == "huber":
+            self.cfg.calibration.huber_matrix = np.asarray(matrix, dtype=float).tolist()
+        else:
+            self.cfg.calibration.matrix = np.asarray(matrix, dtype=float).tolist()
+
+    def _on_save_config(self, _event) -> None:
+        try:
+            self._sync_cfg_matrix(self._active_calibration().matrix)
+            self.cfg.save()
+            self._status.value = f"saved current {self._cal_stack} matrix to config file."
+        except Exception as exc:  # noqa: BLE001
+            self._status.value = f"config save failed: {exc}"
+
+    def _store_key(self) -> str:
+        return f"microscope.calibration.{self._cal_stack}"
+
+    def _on_save_store(self, _event) -> None:
+        if self.config_store is None:
+            self._status.value = "config store unavailable."
+            return
+        try:
+            matrix = self._active_calibration().matrix.tolist()
+            self.config_store.put(self._store_key(), {"matrix": matrix})
+            self._status.value = "saved {} matrix to config store ({}).".format(
+                self._cal_stack, self.config_store.location)
+        except Exception as exc:  # noqa: BLE001
+            self._status.value = f"store save failed: {exc}"
+
+    def _on_load_store(self, _event) -> None:
+        if self.config_store is None:
+            self._status.value = "config store unavailable."
+            return
+        try:
+            data = self.config_store.get(self._store_key())
+            if not data or "matrix" not in data:
+                self._status.value = "no {} calibration matrix in store.".format(self._cal_stack)
+                return
+            matrix = np.asarray(data["matrix"], dtype=float)
+            self._active_calibration().update_matrix(matrix)
+            self._sync_cfg_matrix(matrix)
+            self._current_matrix_view.object = self._fmt_matrix(
+                "current", self._active_calibration().matrix)
+            self._status.value = (
+                "loaded {} matrix from config store; use save to config to update YAML."
+                .format(self._cal_stack)
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._status.value = f"store load failed: {exc}"
 
     def _on_reject(self, _event) -> None:
         self._proposed = None

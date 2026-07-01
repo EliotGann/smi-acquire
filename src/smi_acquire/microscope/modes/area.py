@@ -262,6 +262,9 @@ class AreaMode:
             return polygon_scans_at_bookmarks(
                 self._store.get_scan_targets(), self._grid_offsets(),
                 scripts_cfg=self.cfg.scripts,
+                polygon_offsets=self._polygon_offsets(),
+                step_x=float(self._step_x.value or 0.0),
+                step_y=float(self._step_y.value or 0.0),
             )
         return area_list_scan_snippet(self._grid_motor, scripts_cfg=self.cfg.scripts)
 

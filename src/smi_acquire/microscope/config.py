@@ -57,6 +57,26 @@ class EpicsConfig(BaseModel):
     sample_name_pv: str | None = None
 
 
+class CameraConfig(BaseModel):
+    """A camera-only EPICS source (used by the wide/top camera)."""
+
+    camera_prefix: str = "SWAXS:SIM:"
+    cam_suffix: str = "widecam1:"
+    image_protocol: str = "ca"
+    image_pv: str = "wideimage1:ArrayData"
+
+
+class WideCameraConfig(BaseModel):
+    camera: CameraConfig = Field(default_factory=CameraConfig)
+    center_px: tuple[float, float] = (320.0, 180.0)
+    path_width_px: float = 580.0
+    path_height_px: float = 10.0
+    image_size_hint: tuple[int, int] = (640, 360)
+    # pixel_delta = matrix @ [z_delta, x_delta]
+    calibration: list[list[float]] = Field(default_factory=lambda: [[-80.0, 0.0], [0.0, -80.0]])
+    out_of_plane_fade: float = 1.0
+
+
 class CalibrationConfig(BaseModel):
     # pixel = matrix @ motor + offset_implicit_from_beam_center.
     #
@@ -157,6 +177,7 @@ class ReferenceBookmark(BaseModel):
 
 class AppConfig(BaseModel):
     epics: EpicsConfig
+    wide_camera: WideCameraConfig = Field(default_factory=WideCameraConfig)
     beam: BeamConfig = Field(default_factory=BeamConfig)
     calibration: CalibrationConfig = Field(default_factory=CalibrationConfig)
     ui: UIConfig = Field(default_factory=UIConfig)

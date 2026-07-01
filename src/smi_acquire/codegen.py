@@ -55,6 +55,18 @@ def _pyval(v: Any) -> str:
     return repr(v)
 
 
+def _name_tokens_expr(name_spec: dict) -> str:
+    """Python expression for smi_plans.bar_name_tokens from a GUI name_spec."""
+    spec = dict(name_spec or {})
+    if not spec:
+        return "None"
+    arc = spec.pop("arc", spec.pop("arc_value", 20.0))
+    parts = [repr(arc)]
+    for key in sorted(spec):
+        parts.append("{}={}".format(key, _pyval(spec[key])))
+    return "bar_name_tokens({})".format(", ".join(parts))
+
+
 # ---------------------------------------------------------------------------
 # sample list block
 # ---------------------------------------------------------------------------
@@ -317,6 +329,8 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
         L.append("from smi_plans import load_holder")
     else:
         L.append("from smi_plans import SampleList")
+    if spec.name_spec:
+        L.append("from smi_plans import apply_name_prefix, bar_name_tokens, preview_bar_name")
     # Redis-first: a named list (energy/incidence/temperature) resolves from the shared store by
     # name. resolve_list requires the store, so open one in the script and pass it (mirrors
     # load_holder's seam). Skipped under for_dryrun (values are inlined for a store-free dry-run).
@@ -336,6 +350,14 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
 
     # ---- sample bar -------------------------------------------------------
     L.append(render_samplelist(spec, named_lists=named_lists))
+    if spec.name_spec:
+        L.append("name_spec = {}".format(_pyval(spec.name_spec)))
+        L.append("name_tokens = {}".format(_name_tokens_expr(spec.name_spec)))
+        L.append("print('filename preview:', preview_bar_name('sample', name_spec=name_spec, printer=None))")
+        L.append("for _s in bar:")
+        L.append("    _s.name = apply_name_prefix(_s.name, name_spec)")
+    else:
+        L.append("name_tokens = None")
     L.append("")
 
     # ---- beam / q ---------------------------------------------------------
@@ -408,6 +430,8 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
             call_kwargs.insert(0, "setup_for=lambda s: setup()")
         if baseline:
             call_kwargs.append("baseline_for=lambda s: [{}]".format(", ".join(baseline)))
+        if spec.name_spec:
+            call_kwargs.append("name_tokens=name_tokens")
         call = "acquire_bar(bar, dets, axes_for, {})".format(", ".join(call_kwargs))
     else:
         if has_align:
@@ -416,7 +440,11 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
             call_kwargs.insert(0, "setup=setup")
         if baseline:
             call_kwargs.append("baseline=[{}]".format(", ".join(baseline)))
-        call = "acquire(bar[0].name, dets, axes_for(bar[0]), sample=bar[0], {})".format(
+        sample_name = "apply_name_prefix(bar[0].name, name_spec)" if spec.name_spec else "bar[0].name"
+        if spec.name_spec:
+            call_kwargs.append("name_tokens=name_tokens")
+        call = "acquire({}, dets, axes_for(bar[0]), sample=bar[0], {})".format(
+            sample_name,
             ", ".join(call_kwargs))
 
     # Wrap in a plan so det_exposure_time (now a plan) is `yield from`'d -- a bare top-level

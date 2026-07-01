@@ -3,12 +3,10 @@ epics:
   cam_suffix: 'cam1:'
   image_protocol: ca
   image_pv: image1:ArrayData
-  # Primary click-to-move axes (the fine piezo x/y/z drive the on-axis view).
   motors:
     x: SWAXS:SIM:pzX
     y: SWAXS:SIM:pzY
     z: SWAXS:SIM:pzZ
-  # Full stacked stage so a captured position records every axis (piezo_* + stage_*).
   piezo_motors:
     x: SWAXS:SIM:pzX
     y: SWAXS:SIM:pzY
@@ -23,6 +21,26 @@ epics:
     chi: SWAXS:SIM:hCHI
     phi: SWAXS:SIM:hPHI
   sample_name_pv: null
+wide_camera:
+  camera:
+    camera_prefix: 'SWAXS:SIM:'
+    cam_suffix: 'widecam1:'
+    image_protocol: ca
+    image_pv: wideimage1:ArrayData
+  center_px:
+  - 320.0
+  - 180.0
+  path_width_px: 580.0
+  path_height_px: 10.0
+  image_size_hint:
+  - 640
+  - 360
+  calibration:
+  - - -80.0
+    - 0.0
+  - - 0.0
+    - -80.0
+  out_of_plane_fade: 1.0
 beam:
   center_px:
   - 320.0
@@ -38,10 +56,10 @@ beam:
       height_px: 80.0
 calibration:
   matrix:
-  - - -100.0
+  - - 634.9999999999998
     - 0.0
   - - 0.0
-    - -100.0
+    - 40.0
   huber_matrix:
   - - -100.0
     - 0.0
