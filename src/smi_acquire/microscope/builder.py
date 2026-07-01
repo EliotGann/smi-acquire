@@ -38,6 +38,7 @@ from .modes.focus import FocusMode
 from .modes.interactive import InteractiveMode
 from .modes.linear import LinearScanMode
 from .modes.square import SquareScanMode
+from .mosaic import MosaicBackground
 from .overlays import BeamOverlay
 from .widgets.beam_panel import BeamPanel
 from .widgets.exposure import ExposureControl
@@ -147,7 +148,6 @@ def _build_figure(cfg: AppConfig):
     fig.toolbar.logo = None
     img_cds = ColumnDataSource(
         data={"image": [placeholder_image(w, h)], "x": [0], "y": [0], "dw": [w], "dh": [h]})
-    fig.image_rgba(image="image", x="x", y="y", dw="dw", dh="dh", source=img_cds)
     return fig, img_cds
 
 
@@ -185,8 +185,11 @@ def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=N
 
     beam_overlay = BeamOverlay(center_px=cfg.beam.center_px, width_px=cfg.beam.width_px,
                                height_px=cfg.beam.height_px)
-    beam_overlay.add_to(fig)
     calibration = CalibrationModel.from_config(cfg.calibration)
+    mosaic = MosaicBackground(fig, stream, stage, beam_overlay, calibration, executor=executor)
+    fig.image_rgba(image="image", x="x", y="y", dw="dw", dh="dh", source=img_cds,
+                   level="image")
+    beam_overlay.add_to(fig)
     # Separate Huber affine for the coarse-stage click-to-move toggle (µm piezo vs mm Huber).
     huber_calibration = CalibrationModel(cfg.calibration.huber_matrix)
 
@@ -244,7 +247,7 @@ def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=N
             pass
 
     setup_tabs = pn.Tabs(("Calibrate", calibrate.panel), ("Motors", motor_panel.view),
-                         ("Beam", beam_panel.view), dynamic=False)
+                         ("Beam", beam_panel.view), ("Map", mosaic.panel), dynamic=False)
     scan_tabs = pn.Tabs((square.name, square.panel), (polygon.name, polygon.panel),
                         (linear.name, linear.panel), dynamic=False)
 
@@ -298,6 +301,7 @@ def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=N
     interval_ms = max(1, int(1000.0 / cfg.ui.poll_hz))
     periodic = [
         (stream.tick, interval_ms),
+        (mosaic.tick, 1000),
         (motor_panel.refresh_readbacks, 500),
         (status_bar.refresh, 1000),
         (exposure.refresh, 1000),

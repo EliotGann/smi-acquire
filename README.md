@@ -49,8 +49,10 @@ pixi run dev-ioc       # terminal 1: fake camera + X/Y/Z motors (SWAXS:SIM:)
 pixi run app           # terminal 2: the app  →  http://localhost:5098/acquire_app
 ```
 
-`pixi run app-real` is the variant for later real PVs (point `config/microscope.local.yaml`
-at your hardware); `app` defaults to localhost-only EPICS so it can only ever see the fake IOC.
+`pixi run app` is the safe development mode: localhost-only EPICS, in-memory sample/list stores,
+and no Redis proposal/interlock reads. It cannot touch real PVs or the shared beamline Redis
+store. `pixi run app-real` is the live variant: it loads `config/microscope.local.yaml` and opts
+back into live Redis/interlock/proposal access.
 
 ---
 

@@ -45,6 +45,16 @@ def test_add_sample_and_capture_position():
     assert acq.sample_by_id(s.id).nominal.piezo_x == 11.0
 
 
+def test_offline_env_does_not_touch_sample_store_redis(monkeypatch):
+    """The dev safety env must force an in-memory store, not probe the beamline Redis."""
+    monkeypatch.setenv("SMI_ACQUIRE_OFFLINE", "1")
+    monkeypatch.setattr("smi_acquire.store.SampleStore.from_redis",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("redis touched")))
+    acq = AcquireStore.connect()
+    assert not acq.live
+    assert acq.location == "offline (in-memory)"
+
+
 def test_holder_membership():
     acq = _demo_store()
     hot = acq.holder_by_name("hot")

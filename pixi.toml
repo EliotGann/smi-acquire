@@ -49,6 +49,11 @@ PYTHONNOUSERSITE = "1"
 SMI_PLANS_PATH = "../smi-plans/src"
 # Point the vendored microscope at the bundled fake-IOC config.
 BEAM_IMAGE_CONFIG = "config/microscope.yaml"
+# Development safety default: never touch the beamline Redis sample/list stores or RE-busy key.
+# `app-real` explicitly opts back into live Redis below.
+SMI_ACQUIRE_OFFLINE = "1"
+SMI_ACQUIRE_NO_INTERLOCK = "1"
+SMI_ACQUIRE_NO_PROPOSAL = "1"
 
 # --------------------------------------------------------------------------
 # The unified guided-interview app (interrogation + interactive sample builder).
@@ -56,12 +61,12 @@ BEAM_IMAGE_CONFIG = "config/microscope.yaml"
 # Run `pixi run dev-ioc` in another terminal first for the live camera + motors.
 #
 # NOTE: `dev-ioc` binds the fake IOC to loopback only, so the app (a CA *client*) must be
-# told to look at 127.0.0.1 — hence the EPICS_CA_* env here. Without it the client broadcasts
-# on the real NIC and never finds SWAXS:SIM:*. This is the hardware-free default.
+# told to look at 127.0.0.1 — hence the EPICS_CA_* env here. Redis is forced offline by the
+# activation env above, so this task cannot read/write the shared beamline stores.
 # --------------------------------------------------------------------------
 [tasks.app]
 cmd = "panel serve apps/acquire_app.py --show --autoreload --port 5098"
-env = { BEAM_IMAGE_CONFIG = "config/microscope.yaml", EPICS_CA_AUTO_ADDR_LIST = "no", EPICS_CA_ADDR_LIST = "127.0.0.1" }
+env = { BEAM_IMAGE_CONFIG = "config/microscope.yaml", EPICS_CA_AUTO_ADDR_LIST = "no", EPICS_CA_ADDR_LIST = "127.0.0.1", SMI_ACQUIRE_OFFLINE = "1", SMI_ACQUIRE_NO_INTERLOCK = "1", SMI_ACQUIRE_NO_PROPOSAL = "1" }
 
 # Hardware-free fake IOC (SWAXS:SIM: camera + X/Y/Z motors), bound to localhost.
 [tasks.dev-ioc]
@@ -73,7 +78,7 @@ env = { EPICS_CA_AUTO_ADDR_LIST = "no", EPICS_CA_ADDR_LIST = "127.0.0.1", EPICS_
 # (the gitignored real-PV override: XF:12IDC camera over PVA + the SmarAct piezo motors).
 [tasks.app-real]
 cmd = "panel serve apps/acquire_app.py --show --autoreload --port 5098"
-env = { BEAM_IMAGE_CONFIG = "config/microscope.local.yaml" }
+env = { BEAM_IMAGE_CONFIG = "config/microscope.local.yaml", SMI_ACQUIRE_OFFLINE = "0", SMI_ACQUIRE_NO_INTERLOCK = "0", SMI_ACQUIRE_NO_PROPOSAL = "0" }
 
 [tasks.test]
 cmd = "python -m pytest tests/ -q"

@@ -23,6 +23,16 @@ def test_offline_connect_is_not_live():
     assert acq.list_names("energy") == []
 
 
+def test_offline_env_does_not_touch_list_store_redis(monkeypatch):
+    """The dev safety env must force an in-memory named-list store, not Redis."""
+    monkeypatch.setenv("SMI_ACQUIRE_OFFLINE", "1")
+    monkeypatch.setattr("smi_acquire.lists.ListStore.from_redis",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("redis touched")))
+    acq = AcquireListStore.connect()
+    assert not acq.live
+    assert acq.location == "offline (in-memory)"
+
+
 def test_save_and_load_energy_list_roundtrips_spec_and_md():
     acq = _store()
     spec = {"boundaries": [2470.0, 2472.0, 2476.0], "steps": [1.0, 0.25]}
@@ -110,4 +120,3 @@ def test_temperature_list_roundtrips_cycle_and_rate():
     assert nl.values == [30.0, 60.0, 90.0, 90.0, 60.0, 30.0]   # materialized post-cycle
     assert nl.spec == {"values": [30.0, 60.0, 90.0], "cycle": True}
     assert nl.md["ramp_rate"] == 5.0 and nl.md["first_soak"] == 300.0
-

@@ -10,10 +10,13 @@ Publishes:
       piezo (fine, top):  SWAXS:SIM:pzX / pzY / pzZ / pzTH / pzCHI
       Huber (coarse):     SWAXS:SIM:hX / hY / hZ / hTHETA / hCHI / hPHI
 
-The image pattern depends on the (piezo) x/y/z motor positions so click-to-move and bookmark
-projection have something meaningful to track.  (The rotation axes do NOT yet rotate the
-synthetic image — the rotation-aware click math is deferred to real-hardware work; here they
-exist so the full axis state can be captured and moved.)
+The image is a camera-sized viewport into a deterministic virtual sample field roughly 100 camera
+frames wide by 10 frames high.  The field has tile/grid landmarks, slow global contrast changes,
+and many local speckle-like features, so motor motion looks like panning across a real mounted
+field instead of sliding over a small repeating checkerboard.  The field is generated as cached
+640x480 tiles; each frame composes the few tiles visible in the viewport, keeping the CA server
+responsive without allocating the full virtual field.  (The rotation axes do NOT yet rotate the
+synthetic image — they exist so the full axis state can be captured and moved.)
 
 Startup note: each ``FakeMotor`` initializes its record fields (``.VAL``/``.RBV``/…) on an async
 startup task, so with this many motors the IOC takes ~15–25 s before *all* fields answer CA
@@ -22,6 +25,8 @@ a one-shot client should wait accordingly.
 """
 
 from __future__ import annotations
+
+from functools import lru_cache
 
 import numpy as np
 from caproto import ChannelType
@@ -32,47 +37,131 @@ WIDTH = 640
 HEIGHT = 480
 DEPTH = 3
 FRAME_RATE_HZ = 10
-PX_PER_MM = 100.0
+FIELD_TILES_X = 100
+FIELD_TILES_Y = 10
+FIELD_WIDTH = WIDTH * FIELD_TILES_X
+FIELD_HEIGHT = HEIGHT * FIELD_TILES_Y
+# Map the fake motor limits (-50..50) across the virtual field.  This makes the whole travel range
+# cover the full synthetic sample while keeping the displayed viewport camera-sized.
+FIELD_X_PX_PER_MM = (FIELD_WIDTH - WIDTH) / 100.0
+FIELD_Y_PX_PER_MM = (FIELD_HEIGHT - HEIGHT) / 100.0
+
+
+def _hash01(i: int | np.ndarray, j: int | np.ndarray, salt: int = 0) -> float | np.ndarray:
+    """Deterministic 0..1 pseudo-random value for integer lattice coordinates."""
+    mask = np.uint64(0xFFFFFFFF)
+    n = (np.asarray(i, dtype=np.uint64) * np.uint64(374761393)) & mask
+    n ^= (np.asarray(j, dtype=np.uint64) * np.uint64(668265263)) & mask
+    n ^= (np.uint64(salt) * np.uint64(2246822519)) & mask
+    n = ((n ^ (n >> np.uint64(13))) * np.uint64(1274126177)) & mask
+    n = (n ^ (n >> np.uint64(16))) & mask
+    out = n.astype(np.float32) / np.float32(0xFFFFFFFF)
+    if out.shape == ():
+        return float(out)
+    return out
+
+
+@lru_cache(maxsize=64)
+def _render_tile(tile_x_i: int, tile_y_i: int) -> np.ndarray:
+    """Render one deterministic 640x480 tile of the virtual sample field."""
+    yy, xx = np.indices((HEIGHT, WIDTH), dtype=np.float32)
+    gx = xx + tile_x_i * WIDTH
+    gy = yy + tile_y_i * HEIGHT
+    tile_hash = _hash01(tile_x_i, tile_y_i, 1)
+
+    r = 72 + 35 * np.sin(gx / 5200.0) + 22 * np.cos((gx + gy) / 2400.0)
+    g = 78 + 32 * np.sin(gy / 1500.0 + 0.8) + 18 * np.cos(gx / 3400.0)
+    b = 82 + 30 * np.cos((gx - 2 * gy) / 3100.0) + 16 * np.sin(gy / 800.0)
+    r += 55 * (tile_hash - 0.5)
+    g += 45 * (_hash01(tile_x_i, tile_y_i, 2) - 0.5)
+    b += 40 * (_hash01(tile_x_i, tile_y_i, 3) - 0.5)
+
+    edge_dist = np.minimum.reduce([xx, WIDTH - xx, yy, HEIGHT - yy])
+    minor_x = np.minimum(xx % 160, 160 - (xx % 160))
+    minor_y = np.minimum(yy % 120, 120 - (yy % 120))
+    major = edge_dist < 4
+    minor = (minor_x < 1.5) | (minor_y < 1.5)
+    r = np.where(major, 225, r)
+    g = np.where(major, 210, g)
+    b = np.where(major, 80, b)
+    r = np.where(minor & ~major, r * 0.62, r)
+    g = np.where(minor & ~major, g * 0.62, g)
+    b = np.where(minor & ~major, b * 0.62, b)
+
+    fid = ((xx - 42) ** 2 + (yy - 42) ** 2) < (10 + 10 * tile_hash) ** 2
+    stripe = (xx < 18 + 30 * _hash01(tile_x_i, tile_y_i, 4)) & (yy < 75)
+    r = np.where(fid | stripe, 245, r)
+    g = np.where(fid, 40 + 180 * _hash01(tile_x_i, tile_y_i, 5), np.where(stripe, 120, g))
+    b = np.where(fid | stripe, 35, b)
+
+    feat = np.zeros((HEIGHT, WIDTH), dtype=np.float32)
+    cell = 96.0
+    ix0 = int(np.floor(tile_x_i * WIDTH / cell)) - 1
+    ix1 = int(np.ceil((tile_x_i + 1) * WIDTH / cell)) + 1
+    iy0 = int(np.floor(tile_y_i * HEIGHT / cell)) - 1
+    iy1 = int(np.ceil((tile_y_i + 1) * HEIGHT / cell)) + 1
+    for iy in range(iy0, iy1 + 1):
+        for ix in range(ix0, ix1 + 1):
+            cx = (ix + 0.15 + 0.7 * _hash01(ix, iy, 11)) * cell - tile_x_i * WIDTH
+            cy = (iy + 0.15 + 0.7 * _hash01(ix, iy, 12)) * cell - tile_y_i * HEIGHT
+            amp = 65 + 160 * _hash01(ix, iy, 13)
+            sigma = 3.0 + 13.0 * _hash01(ix, iy, 14)
+            radius = max(16, int(4 * sigma))
+            if cx + radius < 0 or cx - radius >= WIDTH or cy + radius < 0 or cy - radius >= HEIGHT:
+                continue
+            x0 = max(0, int(cx - radius))
+            x1 = min(WIDTH, int(cx + radius + 1))
+            y0 = max(0, int(cy - radius))
+            y1 = min(HEIGHT, int(cy + radius + 1))
+            spot = np.exp(-(((xx[y0:y1, x0:x1] - cx) ** 2
+                             + (yy[y0:y1, x0:x1] - cy) ** 2) / (2 * sigma ** 2))) * amp
+            feat[y0:y1, x0:x1] += spot.astype(np.float32)
+
+    r = np.clip(r + feat, 0, 255).astype(np.uint8)
+    g = np.clip(g + 0.65 * feat, 0, 255).astype(np.uint8)
+    b = np.clip(b + 0.35 * feat, 0, 255).astype(np.uint8)
+    return np.stack([r, g, b], axis=-1)
+
+
+def _slice_virtual_field(x0: int, y0: int) -> np.ndarray:
+    """Compose a camera viewport from cached virtual-field tiles."""
+    out = np.empty((HEIGHT, WIDTH, 3), dtype=np.uint8)
+    x_end = x0 + WIDTH
+    y_end = y0 + HEIGHT
+    for ty in range(y0 // HEIGHT, (y_end - 1) // HEIGHT + 1):
+        for tx in range(x0 // WIDTH, (x_end - 1) // WIDTH + 1):
+            tile = _render_tile(tx, ty)
+            src_x0 = max(0, x0 - tx * WIDTH)
+            src_y0 = max(0, y0 - ty * HEIGHT)
+            src_x1 = min(WIDTH, x_end - tx * WIDTH)
+            src_y1 = min(HEIGHT, y_end - ty * HEIGHT)
+            dst_x0 = tx * WIDTH + src_x0 - x0
+            dst_y0 = ty * HEIGHT + src_y0 - y0
+            out[dst_y0:dst_y0 + (src_y1 - src_y0), dst_x0:dst_x0 + (src_x1 - src_x0)] = (
+                tile[src_y0:src_y1, src_x0:src_x1]
+            )
+    return out
 
 
 def _render_frame(t: float, mx: float, my: float, mz: float) -> np.ndarray:
-    """Synthetic RGB frame: drifting checkerboard whose alignment depends on motor pos."""
+    """Synthetic RGB frame: viewport into a large deterministic virtual sample field."""
+    # Motor position controls which portion of the large field is visible. Positive motor motion
+    # pans the sample under the fixed camera.
+    origin_x = (FIELD_WIDTH - WIDTH) / 2.0 - mx * FIELD_X_PX_PER_MM
+    origin_y = (FIELD_HEIGHT - HEIGHT) / 2.0 - my * FIELD_Y_PX_PER_MM
+    origin_x = np.clip(origin_x, 0, FIELD_WIDTH - WIDTH)
+    origin_y = np.clip(origin_y, 0, FIELD_HEIGHT - HEIGHT)
+    x0 = int(round(origin_x))
+    y0 = int(round(origin_y))
+    rgb = _slice_virtual_field(x0, y0)
+
+    # Add a z-dependent defocus wash so the focus tab has a visibly changing metric.
     yy, xx = np.indices((HEIGHT, WIDTH), dtype=np.float32)
-    # Tie pixel offset to motor position so moving the stage looks like moving a sample.
-    offset_x = -mx * PX_PER_MM
-    offset_y = -my * PX_PER_MM
-    cell = 40
-    u = ((xx - offset_x) // cell).astype(int)
-    v = ((yy - offset_y) // cell).astype(int)
-    base = ((u + v) % 2).astype(np.uint8) * 80 + 60  # 60 / 140 squares
-
-    # Add a focus halo so z does something visible.
-    cx, cy = WIDTH / 2, HEIGHT / 2
-    rr = np.hypot(xx - cx, yy - cy)
-    focus_sigma = 40.0 + 200.0 * abs(mz)
-    halo = np.exp(-(rr**2) / (2 * focus_sigma**2)) * 60.0
-
-    # A bright feature ~ at the origin (in motor coords), to make calibration easy. We
-    # additionally render a few off-axis weaker spots so phase-cross-correlation has unique
-    # peaks (the checkerboard alone is too periodic).
-    feature_offsets = [
-        (0.0, 0.0, 220.0, 8.0),
-        (2.0, -1.5, 150.0, 5.0),   # in pixel units from the bright feature's image position
-        (-3.0, 2.5, 130.0, 5.0),
-    ]
-    feat = np.zeros_like(base, dtype=np.float32)
-    for ox_cells, oy_cells, amp, sigma in feature_offsets:
-        feat_px_x = cx - mx * PX_PER_MM + ox_cells * 30
-        feat_px_y = cy - my * PX_PER_MM + oy_cells * 30
-        feat += np.exp(
-            -(((xx - feat_px_x) ** 2 + (yy - feat_px_y) ** 2) / (2 * sigma ** 2))
-        ) * amp
-
-    r = np.clip(base + halo + feat, 0, 255).astype(np.uint8)
-    g = np.clip(base + 0.5 * halo + 0.6 * feat, 0, 255).astype(np.uint8)
-    b = np.clip(base * 0.7 + 0.3 * feat, 0, 255).astype(np.uint8)
-    rgb = np.stack([r, g, b], axis=-1)  # (H, W, 3) — RGB3 layout
-    return rgb
+    cx_view, cy_view = WIDTH / 2, HEIGHT / 2
+    rr = np.hypot(xx - cx_view, yy - cy_view)
+    focus_sigma = 35.0 + 180.0 * abs(mz)
+    halo = np.exp(-(rr**2) / (2 * focus_sigma**2))[..., None] * np.array([45.0, 22.0, 11.0])
+    return np.clip(rgb.astype(np.float32) + halo, 0, 255).astype(np.uint8)
 
 
 class CamGroup(PVGroup):

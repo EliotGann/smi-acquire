@@ -95,3 +95,27 @@ def test_minimal_config_falls_back_to_xyz(monkeypatch):
     st = dev.SampleStage.from_config(epics, name="stage")
     assert set(st.all_axes()) == {"piezo_x", "piezo_y", "piezo_z"}
     assert st.piezo is None and st.huber is None
+
+
+def test_dev_config_pvs_are_published_by_fake_ioc():
+    """The safe dev microscope config must only reference PVs from the bundled fake IOC."""
+    from smi_acquire.microscope.config import load_config
+    from smi_acquire.sim.fake_ioc import SwaxsSimIOC
+
+    cfg = load_config("config/microscope.yaml")
+    ioc = SwaxsSimIOC(prefix="SWAXS:SIM:")
+    published = set(ioc.pvdb)
+
+    expected = [
+        cfg.epics.camera_prefix + cfg.epics.cam_suffix + suffix
+        for suffix in ("ColorMode_RBV", "AcquireTime", "AcquireTime_RBV")
+    ]
+    expected += [
+        cfg.epics.camera_prefix + "image1:" + suffix
+        for suffix in ("ArraySize0_RBV", "ArraySize1_RBV", "ArraySize2_RBV", "ArrayData")
+    ]
+    expected += list(cfg.epics.motors.values())
+    expected += list(cfg.epics.piezo_motors.values())
+    expected += list(cfg.epics.stage_motors.values())
+
+    assert sorted(set(expected) - published) == []
