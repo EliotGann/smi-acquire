@@ -67,6 +67,27 @@ def _name_tokens_expr(name_spec: dict) -> str:
     return "bar_name_tokens({})".format(", ".join(parts))
 
 
+def _economy_name_tokens(name_spec: dict) -> list[str]:
+    """Literal filename tokens for an arc-economy (``multi_sample_run``) scan.
+
+    Unlike :func:`bar_name_tokens` — which bakes a *fixed* arc value into the token — arc economy
+    sweeps ``waxs.arc`` across the outer loop, so the arc token must be the recorded-key TEMPLATE
+    ``wa{waxs_arc}`` that resolves to each step's actual arc, not a baked ``wa20.0`` literal.
+    Mirrors ``bar_name_tokens``' default token spellings for energy/incidence.
+    """
+    spec = dict(name_spec or {})
+    toks: list[str] = []
+    if spec.get("include_energy", True):
+        toks.append("{energy_energy}eV")
+    if spec.get("include_incidence", False):
+        toks.append("ai{incident_angle}")
+    if spec.get("include_arc", True):
+        toks.append("wa{waxs_arc}")  # template on the recorded key, NOT arc_fmt.format(value)
+    for extra in spec.get("extra_tokens", []) or []:
+        toks.append(str(extra))
+    return toks
+
+
 # ---------------------------------------------------------------------------
 # sample list block
 # ---------------------------------------------------------------------------
@@ -237,16 +258,17 @@ def _mot(params) -> str:
 # ---------------------------------------------------------------------------
 # imports tracking
 # ---------------------------------------------------------------------------
-def _needed_builders(spec: ExperimentSpec) -> List[str]:
+def _needed_builders(spec: ExperimentSpec, axes=None) -> List[str]:
+    axes = spec.axes if axes is None else axes
     builders = {
         "energy": "energy_axis", "temperature": "temperature_axis",
         "incidence": "incidence_axis", "motor": "motor_axis",
         "spatial": "spatial_grid_axes", "potential": "potential_axis",
         "rh": "rh_axis", "time": "time_axis", "manual": "manual_axis",
     }
-    used = {builders[a.type] for a in spec.axes if a.type in builders}
+    used = {builders[a.type] for a in axes if a.type in builders}
     # speed constants used by motor axes
-    if any(a.type == "motor" for a in spec.axes):
+    if any(a.type == "motor" for a in axes):
         used.update({"SPEED_FAST", "SPEED_MEDIUM", "SPEED_SLOW"})
     return sorted(used)
 
@@ -296,8 +318,26 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
     needs_bps = bool(ap.attenuators_in)
     needs_signal = any(step.values for step in spec.manual_setup)
 
+    # ---- arc-economy topology (multi_sample_run) --------------------------
+    # Sweep waxs.arc ONCE across the whole bar instead of re-travelling it per sample. Only when
+    # requested AND applicable (multi-sample + a waxs.arc axis). multi_sample_run has no
+    # setup/align hooks, so if the recipe uses those we fall back to acquire_bar and say so.
+    economy_blocked = has_align or has_setup or needs_manual_step
+    use_economy = spec.uses_arc_economy() and not economy_blocked
+    arc_idx = spec.arc_axis_index() if use_economy else -1
+    # In the economy path the arc axis becomes multi_sample_run's swept slow_positions, so it is
+    # NOT rendered as a ScanAxis; only the remaining ("inner") axes are nested inside point().
+    inner_axes = [a for i, a in enumerate(spec.axes) if i != arc_idx] if use_economy else spec.axes
+    arc_axis = spec.axes[arc_idx] if arc_idx >= 0 else None
+
     # ---- imports ----------------------------------------------------------
-    compose_imports = [builder] + _needed_builders(spec)
+    compose_imports = _needed_builders(spec, inner_axes)
+    if use_economy:
+        # multi_sample_run drives the run; the arc axis is swept in the outer loop (not built as
+        # a ScanAxis), and the inner axes are nested via nest_axes inside the point() plan.
+        compose_imports.append("nest_axes")
+    else:
+        compose_imports = [builder] + compose_imports
     if needs_manual_step:
         compose_imports.append("manual_step")
     # Informative header: project, axis-stack summary, sample/event counts, filename tokens.
@@ -310,7 +350,13 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
         _n_samples, "" if _n_samples == 1 else "s",
         spec.events_per_sample(), "" if spec.events_per_sample() == 1 else "s",
         spec.total_events()))
-    _tokens = spec.filename_tokens()
+    if use_economy:
+        _hdr.append("arc economy: waxs.arc swept once across the bar (multi_sample_run; "
+                    "one run/sample held open concurrently)")
+    elif spec.apparatus.arc_economy and economy_blocked:
+        _hdr.append("NOTE: arc economy requested but not applied (multi_sample_run has no "
+                    "setup/align hook) — using acquire_bar (arc re-travels per sample)")
+    _tokens = _economy_name_tokens(spec.name_spec) if use_economy else spec.filename_tokens()
     if _tokens:
         _hdr.append("filename tokens: {}".format(" ".join(_tokens)))
     L: List[str] = ['"""' + "\n".join(_hdr) + '"""',
@@ -320,8 +366,14 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
         L.append("import sys; sys.path.append({!r})".format(tpath))
     L += [
         "from smi_plans._compose import ({})".format(", ".join(sorted(set(compose_imports)))),
-        "from smi_plans._core import saxs_waxs_dets",
     ]
+    if use_economy:
+        L.append("from smi_plans._core import multi_sample_run, dedup_readables")
+        # Per-arc stream naming (arc0/arc20/...) — the smi_plans arc-economy convention that lets
+        # low-angle WAXS-only and high-angle SAXS+WAXS points live in separate consistent streams.
+        L.append("from smi_plans.technique_B_grazing import _arc_stream_name")
+    else:
+        L.append("from smi_plans._core import saxs_waxs_dets")
     # Redis-first samples: reference the holder by name (load_holder). The dry-run inlines the
     # bar via from_columns (store-free), so only the copy-paste script imports load_holder.
     use_holder = named_lists and spec.samples.source == "holder" and bool(spec.samples.holder)
@@ -330,7 +382,10 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
     else:
         L.append("from smi_plans import SampleList")
     if spec.name_spec:
-        L.append("from smi_plans import apply_name_prefix, bar_name_tokens, preview_bar_name")
+        if use_economy:
+            L.append("from smi_plans import apply_name_prefix, preview_bar_name")
+        else:
+            L.append("from smi_plans import apply_name_prefix, bar_name_tokens, preview_bar_name")
     # Redis-first: a named list (energy/incidence/temperature) resolves from the shared store by
     # name. resolve_list requires the store, so open one in the script and pass it (mirrors
     # load_holder's seam). Skipped under for_dryrun (values are inlined for a store-free dry-run).
@@ -339,7 +394,7 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
         a.type in _LIST_KINDS and a.params.get("list_name") for a in spec.axes)
     if needs_resolve_list:
         L.append("from smi_plans import resolve_list, ListStore")
-    if needs_bps:
+    if needs_bps or use_economy:
         L.append("import bluesky.plan_stubs as bps")
     if needs_signal:
         L.append("from ophyd import Signal")
@@ -352,7 +407,13 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
     L.append(render_samplelist(spec, named_lists=named_lists))
     if spec.name_spec:
         L.append("name_spec = {}".format(_pyval(spec.name_spec)))
-        L.append("name_tokens = {}".format(_name_tokens_expr(spec.name_spec)))
+        if use_economy:
+            # Arc-economy: use recorded-key TEMPLATE tokens (wa{waxs_arc}), not a baked arc value,
+            # because the arc varies across the outer loop.
+            L.append("# Use the token, not a fixed literal arc value, for arc-economy scans.")
+            L.append("name_tokens = {}".format(_pyval(_economy_name_tokens(spec.name_spec))))
+        else:
+            L.append("name_tokens = {}".format(_name_tokens_expr(spec.name_spec)))
         L.append("print('filename preview:', preview_bar_name('sample', name_spec=name_spec, printer=None))")
         L.append("for _s in bar:")
         L.append("    _s.name = apply_name_prefix(_s.name, name_spec)")
@@ -362,10 +423,17 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
 
     # ---- beam / q ---------------------------------------------------------
     if spec.beam.arc_aware:
-        L.append("dets = saxs_waxs_dets()        # arc-aware: SAXS dropped if WAXS arc parked")
+        dets_expr = "saxs_waxs_dets()"
+        dets_comment = "        # arc-aware: SAXS dropped if WAXS arc parked"
     else:
-        L.append("dets = [{}]".format(", ".join(spec.beam.detectors)))
-    L.append("reads = [{}]".format(", ".join(spec.beam.reads)))
+        dets_expr = "[{}]".format(", ".join(spec.beam.detectors))
+        dets_comment = ""
+    if not use_economy:
+        L.append("dets = {}{}".format(dets_expr, dets_comment))
+        L.append("reads = [{}]".format(", ".join(spec.beam.reads)))
+    else:
+        # Arc economy names reads `point_reads` (passed to trigger_and_read inside point()).
+        L.append("point_reads = [{}]".format(", ".join(spec.beam.reads)))
     heater_call = heater_identifier(heater_kind)
     if heater_call:
         L.append("heater = {}".format(heater_call))
@@ -392,7 +460,29 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
         L.extend(setup_lines)
         L.append("")
 
-    # ---- axis stack -------------------------------------------------------
+    # ---- axis stack + run -------------------------------------------------
+    md = dict(spec.md)
+    if spec.project_name and "project_name" not in md:
+        md["project_name"] = spec.project_name
+
+    if use_economy:
+        _render_arc_economy(L, spec, inner_axes, arc_axis, md, named_lists=named_lists)
+    else:
+        _render_acquire(L, spec, ap, multi, has_align, has_setup, md, named_lists=named_lists)
+
+    L.append("")
+    L.append("# ---- RUN THIS ----")
+    L.append("RE(run_plan())" if run else "plan = run_plan()")
+
+    text = "\n".join(L)
+    # collapse accidental triple blank lines
+    while "\n\n\n\n" in text:
+        text = text.replace("\n\n\n\n", "\n\n\n")
+    return text.rstrip() + "\n"
+
+
+def _render_acquire(L, spec, ap, multi, has_align, has_setup, md, *, named_lists):
+    """Emit the standard ``acquire`` / ``acquire_bar`` body (one run per sample)."""
     # th0 is only pre-read when incidence is anchored to the CURRENT theta (no alignment). With
     # alignment, incidence is relative (th0=None) -- and we must NOT pre-read piezo.th here,
     # because in acquire_bar axes_for() runs BEFORE the align hook (would capture nominal th).
@@ -410,15 +500,11 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
         L.append("    return []")
     L.append("")
 
-    # ---- the run ----------------------------------------------------------
     call_kwargs = [
         "reads=reads",
         "geometry={!r}".format(ap.geometry),
         "scan_name={!r}".format(spec.scan_name),
     ]
-    md = dict(spec.md)
-    if spec.project_name and "project_name" not in md:
-        md["project_name"] = spec.project_name
     if md:
         call_kwargs.append("md={}".format(_pyval(md)))
     baseline = [v["name"] for step in spec.manual_setup for v in step.values]
@@ -452,15 +538,75 @@ def render(spec: ExperimentSpec, *, templates_path: str | None = None, run: bool
     L.append("def run_plan():")
     L.append("    yield from det_exposure_time({0}, {0})".format(_num(spec.beam.exposure_s)))
     L.append("    return (yield from {})".format(call))
-    L.append("")
-    L.append("# ---- RUN THIS ----")
-    L.append("RE(run_plan())" if run else "plan = run_plan()")
 
-    text = "\n".join(L)
-    # collapse accidental triple blank lines
-    while "\n\n\n\n" in text:
-        text = text.replace("\n\n\n\n", "\n\n\n")
-    return text.rstrip() + "\n"
+
+def _render_arc_economy(L, spec, inner_axes, arc_axis, md, *, named_lists):
+    """Emit the ``multi_sample_run`` (arc-economy) body, per the smi_plans convention.
+
+    The arc axis is swept ONCE in the outer loop (``slow_axis=waxs.arc``) while one run per sample
+    is held open; the inner axes are nested inside ``point`` via ``nest_axes``. Each arc value
+    writes to its OWN event stream (``arc0``/``arc20``/…) so an arc-aware detector set (SAXS
+    dropped at low arc) never changes the recorded data keys *within* a stream — the correct way
+    to keep arc-awareness under one long-lived run. Mirrors
+    ``smi_plans.technique_B_grazing.giwaxs_bar_arc_economy``.
+    """
+    # Per-(sample, arc) detector set, keyed on the REQUESTED arc value (not live position) so the
+    # staged and read detectors always match. arc-aware drops SAXS below the 15° block angle.
+    L.append("def point_dets(sample, arc_value):")
+    if spec.beam.arc_aware:
+        L.append("    dets = [pil900KW]")
+        L.append("    if arc_value >= 15:")
+        L.append("        dets.append(pil2M)")
+        L.append("    return dets")
+    else:
+        L.append("    return [{}]".format(", ".join(spec.beam.detectors)))
+    L.append("")
+
+    # Inner scan axes (everything except the arc), nested inside each sample/arc point.
+    need_th0 = any(a.type == "incidence" for a in inner_axes)
+    L.append("def point(sample, arc_value):")
+    if need_th0:
+        L.append("    th0 = piezo.th.position")
+    if inner_axes:
+        L.append("    axes = [")
+        for a in inner_axes:
+            L.append("        {},".format(_render_axis(a, aligned=False, named_lists=named_lists)))
+        L.append("    ]")
+    else:
+        L.append("    axes = []")
+    L.append("")
+    L.append("    dets = point_dets(sample, arc_value)")
+    # Each arc value gets its own stream so its (consistent) detector set never collides.
+    L.append("    stream = _arc_stream_name(arc_value)")
+    L.append("")
+    L.append("    def measure():")
+    L.append("        yield from bps.trigger_and_read(")
+    L.append("            dedup_readables(list(dets) + point_reads),")
+    L.append("            name=stream,")
+    L.append("        )")
+    L.append("")
+    L.append("    yield from nest_axes(axes, measure)")
+    L.append("")
+
+    arc_positions = _numlist(arc_axis.values()) if arc_axis is not None else "[]"
+    arc_device = arc_axis.params.get("device", "waxs.arc") if arc_axis is not None else "waxs.arc"
+    L.append("def run_plan():")
+    L.append("    yield from det_exposure_time({0}, {0})".format(_num(spec.beam.exposure_s)))
+    L.append("    return (yield from multi_sample_run(")
+    L.append("        bar,")
+    L.append("        slow_axis={},".format(arc_device))
+    L.append("        slow_positions={},".format(arc_positions))
+    L.append("        point=point,")
+    L.append("        dets=point_dets,")
+    L.append("        reads=point_reads,")
+    L.append("        geometry={!r},".format(spec.apparatus.geometry))
+    L.append("        scan_name={!r},".format(spec.scan_name))
+    if md:
+        L.append("        md={},".format(_pyval(md)))
+    L.append("        settle=1.0,")
+    if spec.name_spec:
+        L.append("        name_tokens=name_tokens,")
+    L.append("    ))")
 
 
 # ---------------------------------------------------------------------------

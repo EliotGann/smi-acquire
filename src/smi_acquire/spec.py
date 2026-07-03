@@ -144,6 +144,12 @@ class ApparatusSpec:
     align_angle: float = 0.1
     heater: Optional[str] = None                 # None | "linkam" | "lakeshore"
     attenuators_in: List[str] = field(default_factory=list)
+    # Arc-economy topology: when True (and a slow ``waxs.arc`` axis is present) the generated
+    # script uses ``smi_plans._core.multi_sample_run`` instead of ``acquire_bar`` — the arc is
+    # swept ONCE in the outer loop with one run per sample held open concurrently, so the
+    # in-vacuum arc doesn't re-travel per sample. Only meaningful for a multi-sample bar with an
+    # arc axis; ignored otherwise.
+    arc_economy: bool = False
 
 
 @dataclass
@@ -256,6 +262,29 @@ class ExperimentSpec:
             if tok:
                 toks.append(tok)
         return toks
+
+    def arc_axis_index(self) -> int:
+        """Index into ``axes`` of the slow ``waxs.arc`` motor axis, or -1 if none.
+
+        Arc economy sweeps this axis in ``multi_sample_run``'s outer loop, so it must be a
+        ``motor`` axis whose device is ``waxs.arc``.
+        """
+        for i, a in enumerate(self.axes):
+            if a.type == "motor" and a.params.get("device") == "waxs.arc":
+                return i
+        return -1
+
+    def has_arc_axis(self) -> bool:
+        return self.arc_axis_index() >= 0
+
+    def uses_arc_economy(self) -> bool:
+        """True when the arc-economy topology should actually be emitted.
+
+        Requires the flag set, more than one sample (so concurrent per-sample runs matter), and a
+        ``waxs.arc`` axis to sweep in the outer loop. Otherwise the normal ``acquire_bar`` /
+        ``acquire`` path is used.
+        """
+        return bool(self.apparatus.arc_economy) and self.n_samples() > 1 and self.has_arc_axis()
 
     def summary(self) -> str:
         """One-line human summary of the axis stack (outer → inner)."""

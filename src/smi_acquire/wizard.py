@@ -126,6 +126,7 @@ class WizardState:
     align_angle: float = 0.1
     heater: Optional[str] = None
     attenuators_in: List[str] = field(default_factory=list)
+    arc_economy: bool = False           # sweep waxs.arc once across the bar (multi_sample_run)
 
     # step 2/3 — the changes (nested scan axes, outermost first)
     axes: List[AxisSpec] = field(default_factory=list)
@@ -216,7 +217,13 @@ class WizardState:
             ap.align_angle = float(self.align_angle)
         ap.heater = self.heater
         ap.attenuators_in = list(self.attenuators_in)
+        ap.arc_economy = bool(self.arc_economy)
         return ap
+
+    def has_arc_axis(self) -> bool:
+        """True when a slow ``waxs.arc`` motor axis is in the stack (arc economy applies)."""
+        return any(a.type == "motor" and a.params.get("device") == "waxs.arc"
+                   for a in self.axes)
 
     def suggested_scan_name(self) -> str:
         if self.scan_name:
@@ -272,6 +279,7 @@ class WizardState:
             align_angle=exp.apparatus.align_angle,
             heater=exp.apparatus.heater,
             attenuators_in=list(exp.apparatus.attenuators_in),
+            arc_economy=bool(getattr(exp.apparatus, "arc_economy", False)),
             axes=[AxisSpec(type=a.type, params=dict(a.params)) for a in exp.axes],
             target_kind=exp.target.kind if exp.target.kind in ("all", "holder") else "all",
             target_holder_id=exp.target.holder_id,

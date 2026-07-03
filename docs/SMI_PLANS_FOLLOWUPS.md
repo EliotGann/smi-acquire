@@ -120,3 +120,62 @@ period**, not a value list — so `resolve_list` doesn't apply, and the GUI's ti
 the plain n_frames/period form (no name/save/open). If an exposure-time **list** axis is ever
 wanted, it needs a new axis builder in smi-plans first; only then does a `time` named-list editor
 make sense.
+
+---
+
+## 7. Publish latest `pf` alignment result for persistent viewers
+
+**Why:** the Alignment tab in smi-acquire now has a persistent latest-`pf` display, and the same
+handoff should also work from QueueServer later. The analysis/profile side should publish the
+latest `pf` result into the shared operational Redis/config area; browser apps should only read
+that payload and render it.
+
+**Change (smi-plans/profile):** add a `publish: bool = False` option to `smi_plans.analysis.pf`.
+When true, after computing the `PeakResult`, write a JSON payload containing
+`PeakResult.as_dict(arrays=True)` to the operational Redis/config store key below.
+
+**Redis/config-store contract consumed by smi-acquire:**
+- Redis database: operational/config DB, currently db=3 via `AcquireConfigStore`, not db=0 and not
+  the db=2 sample/list stores.
+- Key under the `swaxsconfig` prefix: `alignment.pf.latest`.
+- Full Redis key with default prefix: `swaxsconfig:alignment.pf.latest`.
+- Value: JSON dict. Recommended shape:
+
+```json
+{
+  "version": 1,
+  "updated": "2026-07-03T12:34:56Z",
+  "uid": "...",
+  "scan_id": 12345,
+  "sample_name": "optional",
+  "result": {
+    "scan_id": 12345,
+    "uid": "...",
+    "motor": "piezo_x",
+    "detector": "pil2M",
+    "timestamp": "...",
+    "profile_kind": "peak",
+    "model_name": "gaussian",
+    "peak": 0.0,
+    "com": 0.0,
+    "cen": 0.0,
+    "fwhm": 0.0,
+    "cen_err": 0.0,
+    "fwhm_err": 0.0,
+    "r_squared": 1.0,
+    "x": [],
+    "y": [],
+    "yerr": [],
+    "fit_x": [],
+    "fit_y": [],
+    "fit_lo": [],
+    "fit_hi": [],
+    "message": ""
+  }
+}
+```
+
+**Suggested implementation detail:** keep the publisher in smi-plans/profile code, near `pf`, and
+reuse the same Redis host/port/SSL/secret conventions as the profile collection. smi-acquire only
+reads the key through `AcquireConfigStore` and renders the arrays; it does not query Tiled or call
+`pf` itself.

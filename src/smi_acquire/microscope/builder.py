@@ -28,12 +28,14 @@ from bokeh.events import Tap
 from bokeh.models import ColumnDataSource, CustomJS, Div
 from bokeh.plotting import figure
 
+from smi_acquire.alignment_pf import LatestPFProvider
 from smi_acquire.config_store import AcquireConfigStore
 
 from .calibration import CalibrationModel
 from .camera_stream import CameraStream, placeholder_image
 from .config import AppConfig, load_config
 from .devices import Camera, SampleStage
+from .modes.alignment import AlignmentMode
 from .modes.area import AreaMode
 from .modes.calibrate import CalibrateMode
 from .modes.focus import FocusMode
@@ -112,11 +114,20 @@ class MicroscopeUI:
     cfg: AppConfig
     capture_slot: pn.Column               # host fills this with capture-position controls
     _periodic: List[tuple]                # (callback, period_ms)
+    _streams: List["CameraStream"]        # camera streams owning background PVA monitors
 
     def attach_periodic_callbacks(self) -> None:
         """Register this microscope's periodic callbacks on the current Panel session."""
         for cb, period in self._periodic:
             pn.state.add_periodic_callback(cb, period=period)
+
+    def close(self) -> None:
+        """Release per-session resources (the background PVA image monitors)."""
+        for stream in self._streams:
+            try:
+                stream.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def bookmark_rows(self, *, motor_object: str = "piezo",
                       include_references: bool = False) -> List[dict]:
@@ -164,7 +175,13 @@ class _NullMode:
     def tick_table(self): ...
 
 
-def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=None) -> MicroscopeUI:
+def build_microscope(
+    cfg: AppConfig | None = None,
+    *,
+    executor=None,
+    interlock=None,
+    pf_provider=None,
+) -> MicroscopeUI:
     """Construct the interactive microscope and return its embeddable pieces.
 
     ``executor`` is an optional :class:`smi_acquire.execute.Executor`; when given, the motor jog
@@ -172,12 +189,15 @@ def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=N
     RunEngine).  ``interlock`` (an :class:`smi_acquire.interlock.Interlock`) additionally gates the
     camera: focus/autofocus + exposure writes are locked out while a scan is running (the camera
     stays passive: display only).  Without them the microscope falls back to direct ophyd moves
-    and unguarded camera writes (standalone use).
+    and unguarded camera writes (standalone use). ``pf_provider`` may be supplied by the host app
+    to populate the Alignment tab's live ``pf`` pane without adding direct Tiled access here.
     """
     cfg = cfg or load_config()
     config_store = AcquireConfigStore.connect()
     camera = Camera.from_config(cfg.epics, name="microscope")
     stage = SampleStage.from_config(cfg.epics, name="stage")
+    if pf_provider is None:
+        pf_provider = LatestPFProvider(config_store, stage=stage, executor=executor)
     for dev, label in ((camera, "camera"), (stage, "stage")):
         try:
             dev.wait_for_connection(timeout=2.0)
@@ -211,13 +231,15 @@ def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=N
     polygon = AreaMode(fig, stage, beam_overlay, calibration, cfg, dims, bookmark_store=interactive)
     square = SquareScanMode(fig, stage, beam_overlay, calibration, cfg, dims, bookmark_store=interactive)
     linear = LinearScanMode(fig, stage, beam_overlay, calibration, cfg, dims, bookmark_store=interactive)
+    alignment = AlignmentMode(fig, stage, beam_overlay, calibration, cfg, dims,
+                              bookmark_store=interactive, pf_provider=pf_provider)
     focus = FocusMode(fig, stage, beam_overlay, calibration, cfg, dims, camera_stream=stream,
                       interlock=interlock)
     calibrate = CalibrateMode(fig, stage, beam_overlay, calibration, cfg, dims,
                               camera_stream=stream, huber_calibration=huber_calibration,
                               config_store=config_store)
     wide = WideCameraView(cfg, stage, executor=executor)
-    modes = (interactive, polygon, square, linear, focus, calibrate)
+    modes = (interactive, polygon, square, linear, alignment, focus, calibrate)
 
     script_panel = ScriptPanel([interactive, square, polygon, linear])
     for scan_mode in (polygon, square, linear):
@@ -273,7 +295,8 @@ def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=N
         sizing_mode="stretch_width",
     )
     main_tabs = pn.Tabs((interactive.name, move_tab), ("Wide", wide.panel), ("Scan", scan_tabs),
-                        (focus.name, focus.panel), ("Setup", setup_tabs), dynamic=False)
+                        (alignment.name, alignment.panel), (focus.name, focus.panel),
+                        ("Setup", setup_tabs), dynamic=False)
 
     def _resolve():
         top = main_tabs.active
@@ -284,6 +307,8 @@ def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=N
         if top == 2:
             return (square, polygon, linear)[scan_tabs.active]
         if top == 3:
+            return alignment
+        if top == 4:
             return focus
         return calibrate if setup_tabs.active == 0 else state["active"]
 
@@ -316,18 +341,25 @@ def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=N
         (motor_panel.refresh_readbacks, 500),
         (status_bar.refresh, 1000),
         (exposure.refresh, 1000),
+        (alignment.poll_pf, 1000),
         (_tick_all, interval_ms),
         (lambda: state["active"].tick_table(), 1000),
         (script_panel.refresh, 1500),
         (lambda: setattr(_js_trigger, "text", "1"), 1500),
     ]
 
-    side = pn.Column(main_tabs, width=440, height=fig.height, scroll=True)
+    side = pn.Column(
+        main_tabs,
+        min_width=440,
+        height=fig.height,
+        sizing_mode="stretch_width",
+        scroll=True,
+    )
     layout = pn.Column(
         pn.pane.Bokeh(_js_trigger, height=0, width=0, margin=0),
         pn.pane.Bokeh(_poly_tool_trigger, height=0, width=0, margin=0),
         exposure.view,
-        pn.Row(pn.pane.Bokeh(fig, sizing_mode="stretch_width"), side),
+        pn.Row(pn.pane.Bokeh(fig, sizing_mode="stretch_width"), side, sizing_mode="stretch_width"),
         pn.layout.Divider(),
         script_panel.view,
         pn.layout.Divider(),
@@ -335,7 +367,7 @@ def build_microscope(cfg: AppConfig | None = None, *, executor=None, interlock=N
     )
     return MicroscopeUI(layout=layout, interactive=interactive, stage=stage,
                         camera=camera, wide=wide, cfg=cfg, capture_slot=capture_slot,
-                        _periodic=periodic)
+                        _periodic=periodic, _streams=[stream, wide.stream])
 
 
 __all__ = ["MicroscopeUI", "build_microscope"]

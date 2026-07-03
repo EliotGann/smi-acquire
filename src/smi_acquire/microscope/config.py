@@ -43,6 +43,11 @@ class EpicsConfig(BaseModel):
     #           the structured value itself, no separate PVs needed.
     image_protocol: str = "ca"  # "ca" | "pva"
     image_pv: str = "image1:ArrayData"
+    # Significant bit depth of the raw image data, used to scale >8-bit frames down to the 8-bit
+    # RGBA the browser displays. e.g. a 12-bit mono camera stored in uint16 needs bit_depth=12
+    # (frame >> 4). ``None`` = infer from the array dtype (uint8→8, uint16→16), which is right for
+    # cameras that fill the full width but too dark for 12-bit-in-uint16 sensors.
+    bit_depth: int | None = None
     # The PRIMARY in-plane alignment axes the camera click-to-move drives (x/y/z). By the SMI
     # stack these are normally the piezo fine axes; kept as ``motors`` for back-compat (every
     # microscope mode uses stage.x/.y/.z).
@@ -64,6 +69,8 @@ class CameraConfig(BaseModel):
     cam_suffix: str = "widecam1:"
     image_protocol: str = "ca"
     image_pv: str = "wideimage1:ArrayData"
+    # See EpicsConfig.bit_depth. e.g. the top-down HEX camera is 12-bit mono → bit_depth=12.
+    bit_depth: int | None = None
 
 
 class WideCameraConfig(BaseModel):

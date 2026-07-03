@@ -88,6 +88,23 @@ class WideCameraView:
         self._bookmarks = list(entries or [])
         self.tick_markers()
 
+    # --- Mode protocol -----------------------------------------------------------------
+    # The builder treats the active tab as a "mode" and drives activate/deactivate/on_tap/
+    # tick_table on it. The Wide tab isn't a scan mode, so these are no-ops — its live image
+    # and markers are refreshed by ``tick`` on the periodic callback list. Implementing the
+    # full protocol keeps ``state["active"]`` uniform and avoids AttributeError when the Wide
+    # tab is selected (builder's ~1 Hz ``tick_table`` poll would otherwise throw).
+    name = "Wide"
+
+    def activate(self) -> None:
+        ...
+
+    def deactivate(self) -> None:
+        ...
+
+    def tick_table(self) -> None:
+        ...
+
     def tick(self) -> None:
         try:
             self.stream.tick()

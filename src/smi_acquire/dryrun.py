@@ -122,7 +122,6 @@ def dry_run(spec: ExperimentSpec) -> DryRunReport:
     # forever.  This mirrors ``smi-plans/tests/conftest.py``: a RunEngine feeds readbacks back
     # into the generator; ``bps.sleep`` is made instant so settle/soak waits don't block; manual
     # ``input`` prompts are answered non-interactively; runs/events are counted from documents.
-    from collections import Counter
     import builtins
     import bluesky.plan_stubs as _bps
     from unittest import mock
@@ -145,13 +144,11 @@ def dry_run(spec: ExperimentSpec) -> DryRunReport:
     def _count(document_list):
         names = [n for n, _ in document_list]
         opens, closes = names.count("start"), names.count("stop")
-        stream = {d["uid"]: d.get("name", "primary")
-                  for n, d in document_list if n == "descriptor"}
-        ev = Counter()
-        for n, d in document_list:
-            if n == "event":
-                ev[stream.get(d["descriptor"], "primary")] += 1
-        return opens, closes, ev.get("primary", 0)
+        # Count events across ALL streams, not just "primary": arc-economy routes each WAXS arc
+        # to its own stream (arc0/arc20/…), so a primary-only count would report 0 events for a
+        # perfectly valid multi-stream scan.
+        events = sum(1 for n, _ in document_list if n == "event")
+        return opens, closes, events
 
     ns = dict(sim.globals_dict())
     ns["RE"] = _RE

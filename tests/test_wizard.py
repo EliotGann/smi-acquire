@@ -173,6 +173,27 @@ def test_round_trip_from_experiment():
     assert {a.type for a in st2.axes} == {"energy", "temperature"}
 
 
+def test_arc_economy_round_trips_and_reaches_spec():
+    st = WizardState(geometry="transmission")
+    st.add_change("motor")   # defaults to waxs.arc
+    st.add_change("energy")
+    assert st.has_arc_axis()
+    st.arc_economy = True
+    # reaches the ExperimentSpec.apparatus
+    assert st.to_spec().apparatus.arc_economy is True
+    # survives the wizard → Experiment → wizard round-trip
+    exp = st.to_experiment(name="econ")
+    assert exp.apparatus.arc_economy is True
+    st2 = WizardState.from_experiment(exp)
+    assert st2.arc_economy is True
+
+
+def test_arc_economy_defaults_off():
+    st = WizardState()
+    assert st.arc_economy is False
+    assert st.to_spec().apparatus.arc_economy is False
+
+
 # ---------------------------------------------------------------------------
 # registry visuals (icons/colors present for every changeable)
 # ---------------------------------------------------------------------------

@@ -6,12 +6,22 @@ Supports two image protocols:
   ``NDPluginStdArrays`` plugin (typically ``image1:ArrayData``). Reshape uses the cam's
   ``ColorMode_RBV`` plus the image plugin's ``ArraySize{0,1,2}_RBV``.
 
-- **PVA** (``image_protocol="pva"``): reads an ``NTNDArray`` over PVAccess via ``p4p`` from an
-  ``NDPluginPva`` plugin (typically ``Pva1:Image``). The NTNDArray carries dimensions and the
-  color-mode attribute inline, so no separate size PVs are required.
+- **PVA** (``image_protocol="pva"``): subscribes to an ``NTNDArray`` over PVAccess via ``p4p``
+  from an ``NDPluginPva`` plugin (typically ``Pva1:Image``). The NTNDArray carries dimensions and
+  the color-mode attribute inline, so no separate size PVs are required.
 
 Both paths return ``(H, W, 3)`` uint8 RGB. Downstream we pack to uint32 RGBA and optionally
 subsample for the display so the WebSocket payload stays small.
+
+**Why PVA uses a background monitor, not a per-tick get.** The Bokeh periodic callbacks
+(:meth:`tick`) run on the server's single Tornado IOLoop thread — the *same* thread that
+serialises frames and pushes them down the WebSocket to the browser. A synchronous
+``Context.get(timeout=5)`` for a multi-megabyte ``NTNDArray`` (the beamline camera is
+3296×2472×3 ≈ 24 MB) blocks that thread for the whole round-trip, starving the WebSocket and
+causing the "missed frames" the operator sees. Instead we open one :meth:`p4p.client.thread.Context.monitor`
+subscription per stream: p4p's worker thread receives each new frame, reshapes it to RGB, and
+stashes it in :attr:`_latest_rgb`. :meth:`tick` then only reads that cached reference (cheap,
+non-blocking) and pushes it out. The heavy reshape/copy also happens off the IOLoop.
 """
 
 from __future__ import annotations
@@ -19,6 +29,8 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
+import time
 import traceback
 from dataclasses import dataclass
 
@@ -95,6 +107,53 @@ def reshape_frame(
     return np.moveaxis(flat.reshape(3, height, width), 0, -1)
 
 
+def to_uint8(arr: np.ndarray, bit_depth: int | None = None) -> np.ndarray:
+    """Scale raw image samples down to uint8 for display.
+
+    Cameras deliver 8-, 12-, or 16-bit data (the latter two stored in ``uint16``). The browser
+    only shows 8-bit RGBA, so wider samples must be right-shifted. ``bit_depth`` gives the number
+    of significant bits (e.g. 12 for a 12-bit sensor in a uint16 buffer → ``>> 4``); when omitted
+    we infer it from the dtype width (uint16 → 16, uint8 → 8), which is correct for sensors that
+    fill the full dtype but renders 12-bit-in-uint16 data too dark — so set ``bit_depth``
+    explicitly for those.
+    """
+    if arr.dtype == np.uint8:
+        return arr
+    if bit_depth is None:
+        bit_depth = arr.dtype.itemsize * 8
+    shift = max(0, int(bit_depth) - 8)
+    if shift == 0:
+        return np.asarray(arr, dtype=np.uint8)
+    # Right-shift keeps the top 8 significant bits; works for any unsigned integer dtype.
+    return np.right_shift(arr, shift).astype(np.uint8)
+
+
+def ntndarray_to_rgb(arr: np.ndarray, bit_depth: int | None = None) -> np.ndarray:
+    """Convert a p4p ``ntndarray`` (already reshaped per its NTNDArray dims) to (H, W, 3) uint8.
+
+    p4p hands us a ``numpy.ndarray`` subclass whose shape reflects the areaDetector ColorMode:
+    ``(H, W)`` Mono, ``(H, W, 3)`` RGB1, ``(3, H, W)`` RGB3, or ``(H, 3, W)`` RGB2. Anything else
+    (notably a zero-length ``(0,)`` array, which the IOC transiently emits between acquisitions)
+    is rejected so the caller can skip it rather than treat it as a real frame. ``bit_depth``
+    (optional) scales >8-bit samples down to 8-bit — see :func:`to_uint8`.
+    """
+    arr = to_uint8(arr, bit_depth)
+    if arr.ndim == 2:
+        # Mono — replicate to RGB for display.
+        mono = np.ascontiguousarray(arr)
+        return np.stack([mono] * 3, axis=-1)
+    if arr.ndim == 3:
+        # Either (H, W, 3) or (3, H, W) depending on the AD ColorMode.
+        if arr.shape[-1] == 3:
+            return np.ascontiguousarray(arr)
+        if arr.shape[0] == 3:
+            return np.ascontiguousarray(np.moveaxis(arr, 0, -1))
+        # Some IOCs emit (H, 3, W) (RGB2 row interleave) — handle as a last resort.
+        if arr.shape[1] == 3:
+            return np.ascontiguousarray(np.moveaxis(arr, 1, -1))
+    raise ValueError(f"unexpected ntndarray shape: {arr.shape}")
+
+
 def stride_for_max_dim(width: int, height: int, max_dim: int) -> int:
     """Integer stride such that subsampling by it keeps both axes ≤ ``max_dim``."""
     if max_dim <= 0:
@@ -127,6 +186,7 @@ class CameraStream:
         self.cds = cds
         self.fallback_size = fallback_size
         self.display_max_dim = display_max_dim
+        self._bit_depth = getattr(epics_cfg, "bit_depth", None) if epics_cfg else None
         self._last_dims: FrameDims | None = None
         self._consecutive_errors = 0
 
@@ -134,6 +194,22 @@ class CameraStream:
         self._protocol = (epics_cfg.image_protocol if epics_cfg else "ca").lower()
         self._pva_ctx = None
         self._pva_pv: str | None = None
+        self._pva_sub = None
+        # Latest frame delivered by the PVA monitor, plus a monotonic timestamp so callers
+        # (autofocus) can tell a fresh post-move frame from a stale one. Guarded by a lock
+        # because it is written from p4p's worker thread and read from the Bokeh IOLoop thread.
+        self._latest_rgb: np.ndarray | None = None
+        self._latest_stamp: float = 0.0
+        self._pva_last_error: BaseException | None = None
+        self._frame_lock = threading.Lock()
+        self._logged_first_pva = False
+        # Display backpressure: we never enqueue a new image patch while the previous one is
+        # still waiting to be flushed to the browser. This coalesces bursts so the Bokeh IOLoop
+        # (which serialises + writes the multi-MB RGBA buffer over the WebSocket) is never
+        # starved by a backlog of image pushes — that backlog is what makes buttons feel laggy.
+        self._push_pending = False
+        self._push_scheduled_at = 0.0
+        self._last_pushed_stamp = -1.0
         _diag(f"CameraStream.__init__ protocol={self._protocol} display_max_dim={display_max_dim}")
         if self._protocol == "pva":
             from p4p.client.thread import Context  # local import — p4p is heavy
@@ -146,9 +222,19 @@ class CameraStream:
                 f"EPICS_PVA_AUTO_ADDR_LIST={os.environ.get('EPICS_PVA_AUTO_ADDR_LIST')!r} "
                 f"EPICS_PVA_NAME_SERVERS={os.environ.get('EPICS_PVA_NAME_SERVERS')!r}"
             )
+            # Subscribe once; frames arrive asynchronously on p4p's worker thread. We keep only
+            # the most recent one — the display never needs a backlog.
+            self._pva_sub = self._pva_ctx.monitor(
+                self._pva_pv, self._on_pva_update, notify_disconnect=True
+            )
 
     def current_dims(self) -> FrameDims:
         return self._last_dims or FrameDims(*self.fallback_size)
+
+    def frame_stamp(self) -> float:
+        """Monotonic timestamp of the last frame the PVA monitor delivered (0 if none/CA)."""
+        with self._frame_lock:
+            return self._latest_stamp
 
     def grab_rgb(self) -> np.ndarray | None:
         """Read the current frame and return (H, W, 3) uint8."""
@@ -163,6 +249,14 @@ class CameraStream:
             log.log(level, "grab_rgb failed (protocol=%s): %r", self._protocol, exc, exc_info=True)
             return None
 
+    @staticmethod
+    def _to_gray_display(rgb: np.ndarray, display_max_dim: int) -> np.ndarray:
+        stride = stride_for_max_dim(rgb.shape[1], rgb.shape[0], display_max_dim)
+        if stride > 1:
+            rgb = rgb[::stride, ::stride, :]
+        rgb = rgb.astype(np.float32)
+        return 0.2126 * rgb[..., 0] + 0.7152 * rgb[..., 1] + 0.0722 * rgb[..., 2]
+
     def grab_gray(self) -> np.ndarray | None:
         """Float32 luminance frame matched to the **displayed** resolution.
 
@@ -175,11 +269,7 @@ class CameraStream:
         rgb = self.grab_rgb()
         if rgb is None:
             return None
-        stride = stride_for_max_dim(rgb.shape[1], rgb.shape[0], self.display_max_dim)
-        if stride > 1:
-            rgb = rgb[::stride, ::stride, :]
-        rgb = rgb.astype(np.float32)
-        return 0.2126 * rgb[..., 0] + 0.7152 * rgb[..., 1] + 0.0722 * rgb[..., 2]
+        return self._to_gray_display(rgb, self.display_max_dim)
 
     # ---- protocol-specific readers --------------------------------------------------
 
@@ -196,56 +286,83 @@ class CameraStream:
         except Exception:
             return None
 
-    def _grab_pva(self) -> np.ndarray | None:
-        assert self._pva_ctx is not None and self._pva_pv is not None
+    def _on_pva_update(self, value) -> None:
+        """p4p monitor callback — runs on p4p's worker thread, **not** the Bokeh IOLoop.
+
+        Reshapes each incoming NTNDArray to RGB here (off the IOLoop) and caches only the most
+        recent frame. Zero-length arrays (emitted transiently between acquisitions) and
+        disconnect notifications are recorded but never overwrite a good frame.
+        """
+        # notify_disconnect=True means we may be handed Disconnected/RemoteError/Cancelled.
+        if isinstance(value, Exception):
+            with self._frame_lock:
+                self._pva_last_error = value
+            _diag(f"PVA monitor for {self._pva_pv!r} event: {value!r}")
+            return
         try:
-            # p4p's NTNDArray handler returns a ``p4p.nt.ndarray.ntndarray`` — a numpy.ndarray
-            # subclass that has already been reshaped per the underlying dim/color_mode. It
-            # also carries ``.attrib`` (dict of NDAttributes) and ``.timestamp``.
-            arr = self._pva_ctx.get(self._pva_pv, timeout=5.0)
-        except Exception as exc:
-            if self._consecutive_errors < 5:
-                _diag(f"PVA get for {self._pva_pv!r} raised: {exc!r}")
+            if not isinstance(value, np.ndarray):
+                raise TypeError(f"unexpected p4p type: {type(value).__name__}")
+            if value.size == 0:
+                # Placeholder update between frames — ignore, keep the last good frame.
+                return
+            rgb = ntndarray_to_rgb(value, self._bit_depth)
+        except Exception as exc:  # noqa: BLE001 — reshape/type errors
+            with self._frame_lock:
+                self._pva_last_error = exc
+            if not self._logged_first_pva:
+                _diag(f"PVA reshape failed: {exc!r}")
                 _diag(traceback.format_exc())
-            raise
+            return
 
-        if arr is None:
-            raise RuntimeError("p4p Context.get returned None")
+        if not self._logged_first_pva:
+            _diag(f"PVA first frame: shape={value.shape}, dtype={value.dtype}, "
+                  f"attrib={dict(getattr(value, 'attrib', {}))}")
+            self._logged_first_pva = True
 
-        # Make sure we got an actual numpy array.
-        if not isinstance(arr, np.ndarray):
-            raise TypeError(f"unexpected p4p return type: {type(arr).__name__}")
+        with self._frame_lock:
+            self._latest_rgb = rgb
+            self._latest_stamp = time.monotonic()
+            self._pva_last_error = None
 
-        if self._consecutive_errors >= 3:
-            _diag(f"PVA recovered: shape={arr.shape}, dtype={arr.dtype}")
-        elif self._consecutive_errors == 0:
-            # First success — useful baseline log.
-            if not getattr(self, "_logged_first_pva", False):
-                _diag(f"PVA first frame: shape={arr.shape}, dtype={arr.dtype}, "
-                      f"attrib={dict(getattr(arr, 'attrib', {}))}")
-                self._logged_first_pva = True
+    def _grab_pva(self) -> np.ndarray | None:
+        """Return the most recent frame delivered by the background monitor (non-blocking).
 
-        # Determine layout from the actual array shape (p4p has already reshaped per dims).
-        if arr.ndim == 2:
-            # Mono — replicate to RGB for display.
-            mono = np.ascontiguousarray(arr, dtype=np.uint8)
-            return np.stack([mono] * 3, axis=-1)
-
-        if arr.ndim == 3:
-            # Either (H, W, 3) or (3, H, W) depending on the AD ColorMode.
-            if arr.shape[-1] == 3:
-                return np.ascontiguousarray(arr, dtype=np.uint8)
-            if arr.shape[0] == 3:
-                return np.ascontiguousarray(np.moveaxis(arr, 0, -1), dtype=np.uint8)
-            # Some IOCs emit (H, 3, W) (RGB2 row interleave) — handle as a last resort.
-            if arr.shape[1] == 3:
-                return np.ascontiguousarray(np.moveaxis(arr, 1, -1), dtype=np.uint8)
-
-        raise RuntimeError(f"unexpected ntndarray shape: {arr.shape}")
+        This never does I/O: it just hands back the cached RGB the monitor thread produced, so it
+        cannot stall the Bokeh IOLoop / WebSocket. Returns ``None`` if no frame has arrived yet
+        (or the PV is disconnected), which the caller renders as the "no signal" placeholder.
+        """
+        with self._frame_lock:
+            rgb = self._latest_rgb
+            err = self._pva_last_error
+        if rgb is None:
+            if err is not None:
+                raise RuntimeError(f"no PVA frame yet ({err!r})")
+            return None
+        return rgb
 
     # ---- display tick ---------------------------------------------------------------
 
     def tick(self) -> None:
+        # Backpressure: if the previous frame's patch hasn't been flushed yet, drop this one
+        # rather than pile another multi-MB write onto a busy IOLoop. A stuck flag (doc torn
+        # down after we scheduled, callback never ran) is force-cleared after a short grace so
+        # the stream can't freeze permanently.
+        if self._push_pending:
+            if (time.monotonic() - self._push_scheduled_at) < 2.0:
+                return
+            self._push_pending = False
+
+        # For the PVA path, skip repacking when no new frame has arrived since the last push —
+        # there's nothing to show and packing/pushing an identical frame just wastes the loop.
+        if self._protocol == "pva":
+            with self._frame_lock:
+                stamp = self._latest_stamp
+                have_frame = self._latest_rgb is not None
+            if have_frame and stamp == self._last_pushed_stamp:
+                return
+        else:
+            stamp = 0.0
+
         try:
             rgb = self.grab_rgb()
             if rgb is None:
@@ -268,10 +385,48 @@ class CameraStream:
             packed = placeholder_image(w, h)
             width, height = w, h
 
-        self.cds.data = {
-            "image": [packed],
-            "x": [0],
-            "y": [0],
-            "dw": [width],
-            "dh": [height],
-        }
+        data = {"image": [packed], "x": [0], "y": [0], "dw": [width], "dh": [height]}
+        self._push_frame(data, stamp)
+
+    def _push_frame(self, data: dict, stamp: float) -> None:
+        """Assign the CDS, coalescing via a next-tick callback so pushes can't stack up.
+
+        We mark ``_push_pending`` before scheduling and clear it once the patch has actually been
+        applied on the doc thread. While pending, :meth:`tick` short-circuits — so if the IOLoop
+        is busy draining a large write, intermediate frames are dropped instead of queued.
+        """
+        def _apply() -> None:
+            try:
+                self.cds.data = data
+                self._last_pushed_stamp = stamp
+            finally:
+                self._push_pending = False
+
+        doc = self._doc()
+        if doc is None:
+            _apply()  # headless / tests — no doc, apply directly
+            return
+        self._push_pending = True
+        self._push_scheduled_at = time.monotonic()
+        try:
+            doc.add_next_tick_callback(_apply)
+        except Exception:  # noqa: BLE001 — doc torn down mid-flight
+            self._push_pending = False
+
+    @staticmethod
+    def _doc():
+        try:
+            import panel as pn
+            return pn.state.curdoc
+        except Exception:  # noqa: BLE001
+            return None
+
+    def close(self) -> None:
+        """Tear down the background PVA monitor (idempotent)."""
+        sub = self._pva_sub
+        self._pva_sub = None
+        if sub is not None:
+            try:
+                sub.close()
+            except Exception:  # noqa: BLE001
+                pass

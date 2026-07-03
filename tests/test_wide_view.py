@@ -122,3 +122,41 @@ def test_wide_out_of_plane_direction_uses_y_delta(monkeypatch):
     view.set_samples([Bookmark("above", x=0, y=2, z=0), Bookmark("below", x=0, y=0, z=0)])
     assert view._oop_cds.data["marker"] == ["triangle", "inverted_triangle"]
     assert view._oop_cds.data["color"] == ["orange", "deepskyblue"]
+
+
+def test_wide_satisfies_mode_protocol(monkeypatch):
+    """The builder treats the active tab as a mode and drives these on it every poll.
+
+    Regression: selecting the Wide tab made ``state["active"]`` a WideCameraView, and the ~1 Hz
+    ``state["active"].tick_table()`` poll threw AttributeError. All Mode-protocol entry points
+    must exist and be safe to call.
+    """
+    from smi_acquire.microscope import wide_view as mod
+
+    class _Camera:
+        @classmethod
+        def from_config(cls, *_a, **_k):
+            return cls()
+
+    class _Stream:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def tick(self):
+            pass
+
+    monkeypatch.setattr(mod, "Camera", _Camera)
+    monkeypatch.setattr(mod, "CameraStream", _Stream)
+    cfg = AppConfig.model_validate({
+        "epics": {"camera_prefix": "SIM:", "motors": {"x": "x", "y": "y", "z": "z"}},
+        "wide_camera": {"center_px": [10, 10], "image_size_hint": [20, 20],
+                        "calibration": [[-10, 0], [0, -10]]},
+    })
+    view = WideCameraView(cfg, _Stage())
+    # None of these may raise (they're no-ops for the non-scan Wide tab).
+    view.activate()
+    view.tick_table()
+    view.tick()
+    view.on_tap(1.0, 2.0)
+    view.deactivate()
+    assert isinstance(view.name, str)

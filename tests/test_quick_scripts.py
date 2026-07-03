@@ -5,10 +5,11 @@ from __future__ import annotations
 import ast
 
 from smi_acquire.microscope.config import ScriptsConfig
-from smi_acquire.microscope.scripts import (Bookmark, bookmark_list_scan_snippet,
-                                           line_scans_at_bookmarks,
-                                           polygon_scans_at_bookmarks,
-                                           square_grid_scans_at_bookmarks)
+from smi_acquire.microscope.scripts import (Bookmark, alignment_line_scans_at_bookmarks,
+                                            bookmark_list_scan_snippet,
+                                            line_scans_at_bookmarks,
+                                            polygon_scans_at_bookmarks,
+                                            square_grid_scans_at_bookmarks)
 
 
 def test_bookmark_quick_script_uses_load_holder_when_possible():
@@ -19,6 +20,10 @@ def test_bookmark_quick_script_uses_load_holder_when_possible():
     assert "load_holder('bar1')" in src
     assert "acquire_bar" in src
     assert "bps.mv" not in src  # positioning is delegated through acquire_bar/goto_sample
+    # No hand-built name_tokens: acquire_bar auto-appends position tokens that resolve to real
+    # recorded keys (see smi_plans skills/naming-and-filename-tokens.md). A hardcoded token risks
+    # a post-run file-writer KeyError.
+    assert "name_tokens" not in src
     ast.parse(src)
 
 
@@ -26,6 +31,7 @@ def test_bookmark_quick_script_falls_back_to_inline_samplelist():
     src = bookmark_list_scan_snippet([Bookmark("a", 1, 2, 3)], ScriptsConfig())
     assert "SampleList.from_columns" in src
     assert "piezo_x" in src and "piezo_y" in src and "piezo_z" in src
+    assert "name_tokens" not in src  # acquire_bar derives them from the set position coords
     ast.parse(src)
 
 
@@ -47,6 +53,18 @@ def test_line_quick_script_uses_motor_axis_with_centered_values():
     assert "motor_axis('x', piezo.x" in src
     assert "name_tokens=('x{x}',)" in src
     assert "bp.scan" not in src
+    ast.parse(src)
+
+
+def test_alignment_line_quick_script_wraps_modes_and_displays_pf():
+    src = alignment_line_scans_at_bookmarks(
+        [Bookmark("a", 1, 2, 3, holder="bar1")], "x", 1.0, 5, ScriptsConfig())
+    assert "yield from smi.modeAlignment()" in src
+    assert "yield from smi.moveMeasurement()" in src
+    assert "from smi_plans import pf" in src
+    assert "display(pf(publish=True))" in src
+    assert "except TypeError:" in src
+    assert "scan_name='alignment_line_scan'" in src
     ast.parse(src)
 
 

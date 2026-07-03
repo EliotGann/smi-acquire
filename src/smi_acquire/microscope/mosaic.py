@@ -16,7 +16,7 @@ from bokeh.models import ColumnDataSource
 from bokeh.plotting import figure as Figure  # noqa: N812
 
 from .calibration import CalibrationModel
-from .camera_stream import CameraStream
+from .camera_stream import CameraStream, stride_for_max_dim
 from .devices import SampleStage
 from .overlays import BeamOverlay
 
@@ -138,9 +138,15 @@ class MosaicBackground:
         if rgb is None:
             self.status.object = "_No camera frame to cache._"
             return False
+        # Cache at DISPLAY resolution, not native. The live frame is drawn at the strided
+        # display size (``stream.current_dims()``), and both the calibration matrix and the beam
+        # centre are in display pixels. Storing native-resolution tiles here made each cached
+        # view render several times larger than the live frame on high-res cameras (e.g. the
+        # 3296×2472 beamline camera strided ×3 for display) and ballooned the mosaic buffers.
+        disp = self._to_display(rgb)
         self._tiles.append(_Tile(
-            gray=_gray(rgb),
-            x=pos[0], y=pos[1], z=pos[2], w=int(rgb.shape[1]), h=int(rgb.shape[0]),
+            gray=_gray(disp),
+            x=pos[0], y=pos[1], z=pos[2], w=int(disp.shape[1]), h=int(disp.shape[0]),
             timestamp=time.time(),
         ))
         self._tiles = self._tiles[-400:]
@@ -194,6 +200,19 @@ class MosaicBackground:
             return (float(self.stage.x.position), float(self.stage.y.position), float(self.stage.z.position))
         except Exception:
             return None
+
+    def _to_display(self, rgb: np.ndarray) -> np.ndarray:
+        """Subsample a native frame to display resolution, matching ``CameraStream.tick``.
+
+        Uses the stream's ``display_max_dim`` so cached tiles line up 1:1 with the live frame
+        and the display-space calibration. Falls back to no subsampling if the stream doesn't
+        advertise a max dim (e.g. simple test doubles).
+        """
+        max_dim = int(getattr(self.stream, "display_max_dim", 0) or 0)
+        if max_dim <= 0:
+            return rgb
+        stride = stride_for_max_dim(rgb.shape[1], rgb.shape[0], max_dim)
+        return rgb[::stride, ::stride, :] if stride > 1 else rgb
 
     def _move_to(self, x: float, y: float) -> None:
         if self.executor is not None:

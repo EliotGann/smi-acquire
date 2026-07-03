@@ -1091,6 +1091,12 @@ class AcquireApp:
             self.micro_box.clear()
             self.micro_box.append(ui.layout)
             self.sync_markers()
+            # Release the camera's background PVA monitors when this session goes away, so
+            # reconnecting browsers don't accumulate orphaned subscriptions.
+            try:
+                pn.state.on_session_destroyed(lambda _ctx: ui.close())
+            except Exception:  # noqa: BLE001 — no session context (e.g. unit tests)
+                pass
         except Exception as exc:
             self.micro_box.clear()
             self.micro_box.append(pn.pane.Alert(
@@ -2325,6 +2331,28 @@ class AcquireApp:
         col.append(pn.pane.HTML(
             "<div style='font-size:15px;color:#37474F'>{}</div>".format(
                 self._wiz_human_summary())))
+
+        # Arc economy — only meaningful with a slow waxs.arc axis and a multi-sample bar. Sweeps
+        # the arc ONCE across the whole bar (multi_sample_run) instead of re-travelling it per
+        # sample. Shown here (not step 1) because it depends on the chosen axis stack.
+        if st.has_arc_axis():
+            econ = pn.widgets.Checkbox(
+                name="Arc economy: sweep WAXS arc once across the bar (multi_sample_run)",
+                value=bool(st.arc_economy))
+
+            def _toggle_econ(e):
+                st.arc_economy = bool(e.new)
+                if self.current_exp is not None:
+                    st.apply_to_experiment(self.current_exp)
+                self._render_script()
+            econ.param.watch(_toggle_econ, "value")
+            col.append(pn.Column(
+                econ,
+                pn.pane.HTML("<div style='font-size:12px;color:#607D8B'>Keeps one run per "
+                             "sample (held open concurrently) while the in-vacuum arc moves "
+                             "once. Not applied if the recipe uses alignment/setup hooks.</div>"),
+                styles={"background": _tint("#5C6BC0"), "padding": "6px 10px",
+                        "border-radius": "8px", "border-left": "4px solid #5C6BC0"}))
 
         validate = pn.widgets.Button(name="Validate (dry-run)", button_type="primary",
                                      width=180)

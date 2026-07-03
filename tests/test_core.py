@@ -12,7 +12,7 @@ import ast
 import pytest
 
 from smi_acquire import interview, codegen, registry
-from smi_acquire.spec import (AxisSpec, BeamSpec, ExperimentSpec, SamplesSpec,
+from smi_acquire.spec import (ApparatusSpec, AxisSpec, BeamSpec, ExperimentSpec, SamplesSpec,
                               energy_grid_values)
 
 
@@ -443,3 +443,112 @@ def test_dryrun_arc_axis_uses_waxs_arc():
         pytest.skip("smi_plans not available")
     assert rep.ok, rep.error
     assert rep.events == 2
+
+
+# ---------------------------------------------------------------------------
+# arc economy (multi_sample_run)
+# ---------------------------------------------------------------------------
+def _arc_economy_spec(*, arc_economy=True, align=None, samples=3, name_spec=None):
+    ap = ApparatusSpec(geometry="transmission", arc_economy=arc_economy, align_routine=align)
+    sp = ExperimentSpec(
+        scan_name="saxs_NEXAFS", project_name="proj",
+        name_spec=name_spec if name_spec is not None else {"include_energy": True, "include_arc": True},
+        beam=BeamSpec(arc_aware=True, reads=["energy", "waxs", "xbpm2", "xbpm3"]),
+        apparatus=ap,
+        axes=[AxisSpec("motor", {"name": "arc", "device": "waxs.arc", "values": [0, 20, 40], "speed": 2}),
+              AxisSpec("energy", {"values": [9600, 9650, 9700]})],
+        samples=SamplesSpec(source="holder", holder="test"),
+    )
+    sp.samples.rows = [{"name": "s{}".format(i)} for i in range(samples)]
+    return sp
+
+
+def test_spec_uses_arc_economy_predicate():
+    sp = _arc_economy_spec()
+    assert sp.has_arc_axis() and sp.arc_axis_index() == 0
+    assert sp.uses_arc_economy()
+    # single sample → economy doesn't apply (no concurrent runs to save)
+    single = _arc_economy_spec(samples=1)
+    assert not single.uses_arc_economy()
+    # no arc axis → doesn't apply
+    noarc = _arc_economy_spec()
+    noarc.axes = [AxisSpec("energy", {"values": [1, 2]})]
+    assert not noarc.has_arc_axis() and not noarc.uses_arc_economy()
+
+
+def test_codegen_arc_economy_emits_multi_sample_run():
+    src = codegen.render(_arc_economy_spec())
+    ast.parse(src)
+    assert "from smi_plans._core import multi_sample_run, dedup_readables" in src
+    assert "from smi_plans.technique_B_grazing import _arc_stream_name" in src
+    assert "from smi_plans._compose import" in src and "nest_axes" in src
+    assert "import bluesky.plan_stubs as bps" in src
+    assert "def point(sample, arc_value):" in src
+    assert "def point_dets(sample, arc_value):" in src
+    assert "yield from nest_axes(axes, measure)" in src
+    assert "slow_axis=waxs.arc," in src
+    assert "slow_positions=[0, 20, 40]," in src
+    assert "dets=point_dets," in src and "point=point," in src
+    # the arc axis itself must NOT be re-emitted as a motor_axis (it's the swept slow axis)
+    assert "motor_axis(" not in src
+    # inner energy axis IS nested inside point
+    assert "energy_axis([9600, 9650, 9700], settle=2)" in src
+    # acquire_bar must not be used
+    assert "acquire_bar" not in src
+
+
+def test_codegen_arc_economy_uses_per_arc_streams_and_arc_aware_dets():
+    """Arc economy routes each arc to its own stream (arc0/arc20/...) with arc-aware dets keyed
+    on the requested value — so a varying detector set never collides within one long-lived run.
+    """
+    src = codegen.render(_arc_economy_spec())
+    # per-arc stream name + name=stream on the read
+    assert "stream = _arc_stream_name(arc_value)" in src
+    assert "name=stream," in src
+    # arc-aware dets by REQUESTED value (not live position), SAXS added above the block angle
+    assert "dets = [pil900KW]" in src
+    assert "if arc_value >= 15:" in src
+    assert "dets.append(pil2M)" in src
+    # must NOT force a fixed list or use the live-position saxs_waxs_dets()
+    assert "saxs_waxs_dets()" not in src
+
+
+def test_codegen_arc_economy_uses_template_arc_token_not_literal():
+    """Arc economy must use the recorded-key template wa{waxs_arc}, not a baked arc value."""
+    src = codegen.render(_arc_economy_spec())
+    assert "name_tokens = ['{energy_energy}eV', 'wa{waxs_arc}']" in src
+    assert "bar_name_tokens(" not in src           # NOT the fixed-arc helper
+    assert "wa{waxs_arc}" in src                    # template on the recorded key
+
+
+def test_codegen_arc_economy_off_uses_acquire_bar():
+    src = codegen.render(_arc_economy_spec(arc_economy=False))
+    ast.parse(src)
+    assert "acquire_bar(bar, dets, axes_for" in src
+    assert "multi_sample_run" not in src
+    # arc axis stays a motor_axis in the normal path
+    assert "motor_axis('arc', waxs.arc," in src
+
+
+def test_codegen_arc_economy_falls_back_when_align_present():
+    """multi_sample_run has no align/setup hook, so an aligned recipe must fall back + warn."""
+    src = codegen.render(_arc_economy_spec(align="alignement_gisaxs_hex"))
+    ast.parse(src)
+    assert "multi_sample_run(bar," not in src       # the economy call is NOT emitted
+    assert "acquire_bar(bar, dets, axes_for" in src
+    assert "arc economy requested but not applied" in src
+
+
+def test_codegen_arc_economy_dryrun():
+    """The emitted multi_sample_run script runs on the sim: N runs (one per sample)."""
+    pytest.importorskip("bluesky")
+    pytest.importorskip("ophyd")
+    from smi_acquire import dryrun
+    sp = _arc_economy_spec(samples=2, name_spec={})   # no name_spec → simplest
+    rep = dryrun.dry_run(sp)
+    if rep.error and "smi_plans not importable" in rep.error:
+        pytest.skip("smi_plans not available")
+    assert rep.ok, rep.error
+    assert rep.runs == 2          # one run per sample (held open concurrently while arc sweeps)
+    # events = samples × arc steps × energies = 2 × 3 × 3 (arc is the outer loop, energy inner)
+    assert rep.events == 2 * 3 * 3

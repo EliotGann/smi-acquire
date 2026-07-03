@@ -454,7 +454,17 @@ class FocusMode:
         results: list[tuple[float, float]],
     ) -> float:
         await _wait_for_status(self.stage.z.set(z))
+        # Timestamp the moment the move completed, then wait (cooperatively) for a frame captured
+        # *after* it, so the focus metric never scores a stale pre-move frame — the PVA display is
+        # fed by a background monitor, so the cached frame right after a move may still be the old
+        # z. ``asyncio.sleep`` keeps the IOLoop responsive while we wait.
+        move_done = self._stream.frame_stamp()
         await asyncio.sleep(settle)
+        deadline = asyncio.get_event_loop().time() + max(settle, 1.0)
+        while self._stream.frame_stamp() <= move_done:
+            if asyncio.get_event_loop().time() >= deadline:
+                break
+            await asyncio.sleep(0.01)
         gray = self._stream.grab_gray()
         if gray is None:
             return 0.0

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from smi_acquire.alignment_pf import LatestPFProvider, PF_CONFIG_KEY, pf_payload_panel
 from smi_acquire.config_store import AcquireConfigStore
 from smi_acquire.microscope.calibration import CalibrationModel
 from smi_acquire.microscope.config import AppConfig, EpicsConfig
@@ -77,3 +78,114 @@ def test_calibrate_mode_loads_and_saves_store_matrix():
     mode._on_load_store(None)
     assert np.allclose(cal.matrix, [[4.0, 1.0], [2.0, 5.0]])
     assert cfg.calibration.matrix == [[4.0, 1.0], [2.0, 5.0]]
+
+
+def test_latest_pf_provider_reads_config_store_key():
+    store = AcquireConfigStore.connect(offline=True)
+    store.put(PF_CONFIG_KEY, {
+        "version": 1,
+        "updated": "2026-07-03T00:00:00Z",
+        "result": {
+            "scan_id": 5,
+            "motor": "piezo_x",
+            "detector": "pil2M",
+            "x": [0, 1, 2],
+            "y": [1, 3, 2],
+            "yerr": [0, 0, 0],
+            "fit_x": [0, 1, 2],
+            "fit_y": [1, 2.8, 2],
+            "cen": 1.0,
+            "fwhm": 0.5,
+            "peak": 1.0,
+            "com": 1.1,
+            "cen_base": 1.2,
+            "fw_base": 0.6,
+            "baseline_noise": 0.01,
+            "baseline_threshold": 0.03,
+            "r_squared": 0.99,
+        },
+    })
+
+    view = LatestPFProvider(store)()
+
+    assert len(view) == 3
+    assert "scan" in view[2].object
+    assert "cen_base" in view[2].object
+    assert "baseline_threshold" in view[2].object
+
+
+def test_latest_pf_provider_fingerprint_changes_with_payload():
+    store = AcquireConfigStore.connect(offline=True)
+    provider = LatestPFProvider(store)
+
+    assert provider.fingerprint() is None
+
+    store.put(PF_CONFIG_KEY, {"result": {"scan_id": 1, "x": [0], "y": [1]}})
+    first = provider.fingerprint()
+    store.put(PF_CONFIG_KEY, {"result": {"scan_id": 2, "x": [0], "y": [2]}})
+
+    assert provider.fingerprint() != first
+
+
+def test_pf_payload_panel_handles_missing_payload():
+    pane = pf_payload_panel(None)
+
+    assert "No published `pf` result" in pane.object
+
+
+def test_pf_payload_panel_offers_move_for_controlled_motor():
+    class Motor:
+        position = 0.0
+
+        def set(self, value):
+            self.position = float(value)
+
+    class Stage:
+        def __init__(self):
+            self.motor = Motor()
+
+        def all_axes(self):
+            return {"piezo_x": self.motor}
+
+    view = pf_payload_panel({
+        "result": {
+            "motor": "piezo_x",
+            "x": [0, 1, 2],
+            "y": [1, 3, 2],
+            "cen": 1.0,
+            "com": 1.1,
+            "peak": 1.0,
+        }
+    }, stage=Stage())
+
+    controls = view[1]
+
+    assert "current `piezo_x`" in controls[1].value
+    assert "purple" in controls[1].value
+
+
+def test_pf_current_position_marker_updates():
+    class Motor:
+        position = 0.0
+
+    class Stage:
+        def __init__(self):
+            self.motor = Motor()
+
+        def all_axes(self):
+            return {"piezo_x": self.motor}
+
+    stage = Stage()
+    view = pf_payload_panel({
+        "result": {
+            "motor": "piezo_x",
+            "x": [0, 1, 2],
+            "y": [1, 3, 2],
+        }
+    }, stage=stage)
+    controls = view[1]._pf_move_controls
+
+    stage.motor.position = 1.25
+    controls.update_current_position()
+
+    assert "1.25" in view[1][1].value

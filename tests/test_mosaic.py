@@ -86,3 +86,41 @@ def test_mosaic_overlaps_are_averaged_not_alpha_stacked():
     rgba = _unpack_rgba(mosaic.cds.data["image"][0])
     assert rgba[..., 0].mean() == 100
     assert set(np.unique(rgba[..., 3])) == {mosaic._capture_alpha}
+
+
+class _HiResStream:
+    """A native-resolution camera whose display frame is strided down (like the real PVA cam)."""
+
+    def __init__(self, native=(480, 640), display_max_dim=160):
+        h, w = native
+        self._rgb = np.zeros((h, w, 3), dtype=np.uint8)
+        self._rgb[..., 0] = 100
+        self.display_max_dim = display_max_dim
+        from smi_acquire.microscope.camera_stream import stride_for_max_dim
+        self._stride = stride_for_max_dim(w, h, display_max_dim)
+        self._disp_w = len(range(0, w, self._stride))
+        self._disp_h = len(range(0, h, self._stride))
+
+    def grab_rgb(self):
+        return self._rgb  # native resolution, as the real stream returns
+
+    def current_dims(self):
+        w, h = self._disp_w, self._disp_h
+        return type("Dims", (), {"width": w, "height": h})()
+
+
+def test_mosaic_caches_at_display_resolution_not_native():
+    # Regression: on high-res cameras the cached tile must match the strided *display* frame,
+    # not the native frame — otherwise the map view renders several times larger than live.
+    fig = figure(width=200, height=150)
+    stream = _HiResStream(native=(480, 640), display_max_dim=160)  # stride 4 → 160x120 display
+    mosaic = MosaicBackground(
+        fig, stream, _Stage(), BeamOverlay((80, 60), 4, 2), CalibrationModel([[-10, 0], [0, -10]])
+    )
+
+    assert mosaic.capture_current(force=True)
+    tile = mosaic._tiles[-1]
+    # Tile must be at display resolution (160x120), NOT native (640x480).
+    assert (tile.w, tile.h) == (stream._disp_w, stream._disp_h)
+    assert tile.gray.shape == (stream._disp_h, stream._disp_w)
+
