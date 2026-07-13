@@ -491,6 +491,7 @@ def line_scans_at_bookmarks(
     pre_plan: str | None = None,
     post_plan: str | None = None,
     include_pf: bool = False,
+    pf_display: str = "pf",
     scan_name: str = "line_scan",
 ) -> str:
     """One outer plan running an identical centered line scan along ``motor_axis`` at each bookmark.
@@ -505,6 +506,8 @@ def line_scans_at_bookmarks(
         )
     if not (distance > 0 and num >= 2):
         return "# set a positive distance and ≥2 points to populate this script\n"
+    if pf_display not in {"pf", "livePF"}:
+        raise ValueError(f"unknown pf display option: {pf_display!r}")
 
     dets_repr = _detectors_repr(scripts_cfg.alignment_detectors)
     half = distance / 2.0
@@ -530,9 +533,9 @@ def line_scans_at_bookmarks(
     if include_pf:
         lines += [
             "    try:",
-            "        from smi_plans import pf",
+            f"        from smi_plans import {pf_display}",
             "    except Exception:",
-            "        pf = None",
+            f"        {pf_display} = None",
             "    try:",
             "        from IPython.display import display",
             "    except Exception:",
@@ -583,15 +586,24 @@ def line_scans_at_bookmarks(
     if post_plan:
         lines.append(f"    yield from {post_plan}")
     if include_pf:
-        lines += [
-            "    if pf is not None:",
-            "        try:",
-            "            display(pf(publish=True))",
-            "        except TypeError:",
-            "            display(pf())",
-            "        except Exception as exc:",
-            "            print(f'pf() failed: {exc!r}')",
-        ]
+        if pf_display == "pf":
+            lines += [
+                "    if pf is not None:",
+                "        try:",
+                "            display(pf(publish=True))",
+                "        except TypeError:",
+                "            display(pf())",
+                "        except Exception as exc:",
+                "            print(f'pf() failed: {exc!r}')",
+            ]
+        else:
+            lines += [
+                "    if livePF is not None:",
+                "        try:",
+                "            display(livePF())",
+                "        except Exception as exc:",
+                "            print(f'livePF() failed: {exc!r}')",
+            ]
     lines.append("")
     return "\n".join(lines)
 
@@ -603,6 +615,7 @@ def alignment_line_scans_at_bookmarks(
     num: int,
     scripts_cfg: ScriptsConfig,
     plan_func_name: str = "all_alignment_line_scans",
+    pf_display: str = "pf",
 ) -> str:
     """Line scan wrapped in SMI alignment/measurement moves with a post-scan ``pf()`` display."""
     return line_scans_at_bookmarks(
@@ -615,5 +628,6 @@ def alignment_line_scans_at_bookmarks(
         pre_plan="smi.modeAlignment()",
         post_plan="smi.moveMeasurement()",
         include_pf=True,
+        pf_display=pf_display,
         scan_name="alignment_line_scan",
     )

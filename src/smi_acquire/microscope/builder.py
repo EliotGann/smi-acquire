@@ -28,7 +28,7 @@ from bokeh.events import Tap
 from bokeh.models import ColumnDataSource, CustomJS, Div
 from bokeh.plotting import figure
 
-from smi_acquire.alignment_pf import LatestPFProvider
+from smi_acquire.alignment_pf import LatestPFProvider, LivePFProvider
 from smi_acquire.config_store import AcquireConfigStore
 
 from .calibration import CalibrationModel
@@ -181,6 +181,7 @@ def build_microscope(
     executor=None,
     interlock=None,
     pf_provider=None,
+    live_pf_provider=None,
 ) -> MicroscopeUI:
     """Construct the interactive microscope and return its embeddable pieces.
 
@@ -190,7 +191,8 @@ def build_microscope(
     camera: focus/autofocus + exposure writes are locked out while a scan is running (the camera
     stays passive: display only).  Without them the microscope falls back to direct ophyd moves
     and unguarded camera writes (standalone use). ``pf_provider`` may be supplied by the host app
-    to populate the Alignment tab's live ``pf`` pane without adding direct Tiled access here.
+    to populate the Alignment tab's latest ``pf`` pane without adding direct Tiled access here.
+    ``live_pf_provider`` may be supplied for a live ``livePF`` pane.
     """
     cfg = cfg or load_config()
     config_store = AcquireConfigStore.connect()
@@ -198,6 +200,8 @@ def build_microscope(
     stage = SampleStage.from_config(cfg.epics, name="stage")
     if pf_provider is None:
         pf_provider = LatestPFProvider(config_store, stage=stage, executor=executor)
+    if live_pf_provider is None:
+        live_pf_provider = LivePFProvider()
     for dev, label in ((camera, "camera"), (stage, "stage")):
         try:
             dev.wait_for_connection(timeout=2.0)
@@ -232,7 +236,8 @@ def build_microscope(
     square = SquareScanMode(fig, stage, beam_overlay, calibration, cfg, dims, bookmark_store=interactive)
     linear = LinearScanMode(fig, stage, beam_overlay, calibration, cfg, dims, bookmark_store=interactive)
     alignment = AlignmentMode(fig, stage, beam_overlay, calibration, cfg, dims,
-                              bookmark_store=interactive, pf_provider=pf_provider)
+                              bookmark_store=interactive, pf_provider=pf_provider,
+                              live_pf_provider=live_pf_provider)
     focus = FocusMode(fig, stage, beam_overlay, calibration, cfg, dims, camera_stream=stream,
                       interlock=interlock)
     calibrate = CalibrateMode(fig, stage, beam_overlay, calibration, cfg, dims,

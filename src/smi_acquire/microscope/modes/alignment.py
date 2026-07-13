@@ -25,9 +25,11 @@ class AlignmentMode(LinearScanMode):
         self,
         *args,
         pf_provider: Callable[[], Any] | None = None,
+        live_pf_provider: Callable[[], Any] | None = None,
         **kwargs,
     ) -> None:
         self._pf_provider = pf_provider
+        self._live_pf_provider = live_pf_provider
         self._pf_fingerprint = None
         super().__init__(*args, **kwargs)
 
@@ -36,13 +38,25 @@ class AlignmentMode(LinearScanMode):
             sizing_mode="stretch_width", height=230,
         )
         self._refresh_pf_btn = pn.widgets.Button(
-            name="Refresh pf", button_type="primary", width=130,
-            disabled=self._pf_provider is None,
+            name="Refresh result", button_type="primary", width=130,
+            disabled=self._pf_provider is None and self._live_pf_provider is None,
         )
         self._refresh_pf_btn.on_click(lambda _e: self.refresh_pf())
         self._pf_result = pn.Column(sizing_mode="stretch_width")
+        self._pf_display = pn.widgets.Select(
+            name="Result display", options=["pf", "livePF"], value="pf", width=150,
+        )
+        self._pf_display.param.watch(lambda _e: self._refresh_script(), "value")
+        self._viewer_mode = pn.widgets.Select(
+            name="Viewer", options=["latest", "live"], value="latest", width=120,
+        )
+        self._viewer_mode.param.watch(self._on_viewer_mode, "value")
         self.pf_panel = pn.Column(
-            pn.Row(pn.pane.Markdown("#### Latest pf", margin=(8, 0, 0, 0)), self._refresh_pf_btn),
+            pn.Row(
+                pn.pane.Markdown("#### Alignment result", margin=(8, 0, 0, 0)),
+                self._viewer_mode,
+                self._refresh_pf_btn,
+            ),
             self._pf_result,
             sizing_mode="stretch_width",
         )
@@ -52,9 +66,9 @@ class AlignmentMode(LinearScanMode):
             pn.pane.Markdown(
                 "Set up a 1D alignment scan from the same scan-target samples used elsewhere. "
                 "The generated plan switches to alignment mode before scanning, returns to "
-                "measurement position afterward, and displays/publishes `pf()` at the end."
+                "measurement position afterward, and displays the selected result view at the end."
             ),
-            pn.Row(self._distance, self._step, self._direction),
+            pn.Row(self._distance, self._step, self._direction, self._pf_display),
             pn.Row(self._add_toggle, self._clear_placed_btn),
             self._count,
             pn.layout.Divider(),
@@ -88,6 +102,7 @@ class AlignmentMode(LinearScanMode):
             distance=dist,
             num=num,
             scripts_cfg=self.cfg.scripts,
+            pf_display=self._pf_display.value,
         )
 
     def tick_table(self) -> None:
@@ -105,6 +120,14 @@ class AlignmentMode(LinearScanMode):
         if text != self._script.value:
             self._script.value = text
 
+    def _on_viewer_mode(self, _event) -> None:
+        self._pf_fingerprint = None
+        self._refresh_pf_button_state()
+        self.refresh_pf(force=True)
+
+    def _refresh_pf_button_state(self) -> None:
+        self._refresh_pf_btn.disabled = self._active_pf_provider() is None
+
     def poll_pf(self) -> None:
         fingerprint = self._latest_pf_fingerprint()
         if fingerprint != self._pf_fingerprint:
@@ -117,19 +140,19 @@ class AlignmentMode(LinearScanMode):
             self.poll_pf()
             return
         self._pf_result.clear()
-        if self._pf_provider is None:
+        provider = self._active_pf_provider()
+        if provider is None:
             self._pf_fingerprint = None
             self._pf_result.append(pn.pane.Markdown(
-                "No live `pf` provider is attached. The generated plan still calls "
-                "`display(pf(publish=True))` after the alignment scan."
+                f"No `{self._viewer_mode.value}` alignment result provider is attached."
             ))
             return
         try:
             if fingerprint is None:
                 fingerprint = self._latest_pf_fingerprint()
-            result = self._pf_provider()
+            result = provider()
         except Exception as exc:  # noqa: BLE001
-            self._pf_result.append(pn.pane.Markdown(f"`pf` refresh failed: `{exc!r}`"))
+            self._pf_result.append(pn.pane.Markdown(f"alignment result refresh failed: `{exc!r}`"))
             return
         self._pf_fingerprint = fingerprint
         self._pf_result.append(pn.panel(result, sizing_mode="stretch_width"))
@@ -151,7 +174,12 @@ class AlignmentMode(LinearScanMode):
                     return
 
     def _latest_pf_fingerprint(self):
-        getter = getattr(self._pf_provider, "fingerprint", None)
+        getter = getattr(self._active_pf_provider(), "fingerprint", None)
         if not callable(getter):
             return object()
         return getter()
+
+    def _active_pf_provider(self):
+        if self._viewer_mode.value == "live":
+            return self._live_pf_provider
+        return self._pf_provider

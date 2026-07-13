@@ -68,6 +68,21 @@ def test_alignment_line_quick_script_wraps_modes_and_displays_pf():
     ast.parse(src)
 
 
+def test_alignment_line_quick_script_can_display_livepf():
+    src = alignment_line_scans_at_bookmarks(
+        [Bookmark("a", 1, 2, 3, holder="bar1")],
+        "x",
+        1.0,
+        5,
+        ScriptsConfig(),
+        pf_display="livePF",
+    )
+    assert "from smi_plans import livePF" in src
+    assert "display(livePF())" in src
+    assert "display(pf(publish=True))" not in src
+    ast.parse(src)
+
+
 def test_polygon_quick_script_uses_backend_region_when_holder_backed():
     src = polygon_scans_at_bookmarks(
         [Bookmark("a", 1, 2, 3, holder="bar1")],

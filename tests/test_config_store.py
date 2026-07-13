@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from smi_acquire.alignment_pf import LatestPFProvider, PF_CONFIG_KEY, pf_payload_panel
+from smi_acquire.alignment_pf import LivePFProvider, LatestPFProvider, PF_CONFIG_KEY, pf_payload_panel
 from smi_acquire.config_store import AcquireConfigStore
 from smi_acquire.microscope.calibration import CalibrationModel
 from smi_acquire.microscope.config import AppConfig, EpicsConfig
@@ -125,6 +125,12 @@ def test_latest_pf_provider_fingerprint_changes_with_payload():
     store.put(PF_CONFIG_KEY, {"result": {"scan_id": 2, "x": [0], "y": [2]}})
 
     assert provider.fingerprint() != first
+
+
+def test_live_pf_provider_reports_unavailable_when_smi_plans_missing():
+    view = LivePFProvider()()
+
+    assert "livePF" in view.object
 
 
 def test_pf_payload_panel_handles_missing_payload():

@@ -58,6 +58,23 @@ class LatestPFProvider:
         return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
+class LivePFProvider:
+    """Callable provider for a live ``smi_plans.livePF`` view."""
+
+    def __call__(self):
+        try:
+            from smi_plans import livePF
+        except Exception as exc:  # noqa: BLE001
+            return pn.pane.Markdown(f"`livePF` is unavailable: `{exc!r}`")
+        try:
+            return livePF()
+        except Exception as exc:  # noqa: BLE001
+            return pn.pane.Markdown(f"`livePF()` failed: `{exc!r}`")
+
+    def fingerprint(self) -> str:
+        return "livePF"
+
+
 def pf_payload_panel(
     payload: dict[str, Any] | None,
     *,
@@ -354,4 +371,4 @@ def _fmt(value: Any) -> str:
     return "n/a" if f is None else f"{f:.6g}"
 
 
-__all__ = ["LatestPFProvider", "PF_CONFIG_KEY", "pf_payload_panel"]
+__all__ = ["LatestPFProvider", "LivePFProvider", "PF_CONFIG_KEY", "pf_payload_panel"]
