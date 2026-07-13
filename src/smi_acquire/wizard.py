@@ -120,6 +120,11 @@ class WizardState:
     project_name: str = ""
     scan_name: str = ""
     name_spec: Dict[str, object] = field(default_factory=dict)
+    q_energy_ev: float = 13500.0
+    q_saxs_distance_m: float = 5.0
+    q_waxs_start_deg: float = 0.0
+    q_waxs_end_deg: float = 20.0
+    q_waxs_tiled: bool = False
 
     # step 1 — apparatus (filled when relevant)
     align_routine: Optional[str] = None
@@ -169,6 +174,10 @@ class WizardState:
     def add_change(self, axis_type: str, *, shape: str = "spot") -> AxisSpec:
         """Add a change (scan axis) with sensible defaults; keep the stack slow-outermost."""
         ax = interview.default_axis(axis_type, shape=shape)
+        if axis_type == "motor" and ax.params.get("device") == "waxs.arc":
+            ax.params["values"] = self.q_waxs_values()
+        elif axis_type == "energy":
+            _center_energy_axis(ax, float(self.q_energy_ev))
         self.axes.append(ax)
         self.axes = interview.reorder_axes_by_speed(self.axes)
         # Apparatus implications.
@@ -225,6 +234,11 @@ class WizardState:
         return any(a.type == "motor" and a.params.get("device") == "waxs.arc"
                    for a in self.axes)
 
+    def q_waxs_values(self) -> List[float]:
+        if self.q_waxs_tiled:
+            return [float(self.q_waxs_start_deg), float(self.q_waxs_end_deg)]
+        return [float(self.q_waxs_start_deg)]
+
     def suggested_scan_name(self) -> str:
         if self.scan_name:
             return self.scan_name
@@ -275,6 +289,9 @@ class WizardState:
             scan_name=exp.scan_name,
             project_name=exp.project_name,
             name_spec=dict(exp.name_spec),
+            q_energy_ev=_representative_energy_ev(exp.axes),
+            q_waxs_start_deg=_waxs_arc_bounds(exp.axes)[0],
+            q_waxs_end_deg=_waxs_arc_bounds(exp.axes)[1],
             align_routine=exp.apparatus.align_routine,
             align_angle=exp.apparatus.align_angle,
             heater=exp.apparatus.heater,
@@ -301,6 +318,37 @@ def _q_from_beam(beam: BeamSpec) -> str:
     if dets == {"pil900KW"}:
         return "waxs"
     return "both"
+
+
+def _representative_energy_ev(axes: List[AxisSpec]) -> float:
+    for ax in axes:
+        if ax.type != "energy":
+            continue
+        vals = ax.values()
+        if vals:
+            return float(vals[len(vals) // 2])
+    return 13500.0
+
+
+def _waxs_arc_bounds(axes: List[AxisSpec]) -> tuple[float, float]:
+    for ax in axes:
+        if ax.type == "motor" and ax.params.get("device") == "waxs.arc":
+            vals = [float(v) for v in ax.params.get("values", []) or []]
+            if vals:
+                return min(vals), max(vals)
+    return 0.0, 20.0
+
+
+def _center_energy_axis(axis: AxisSpec, center_ev: float) -> None:
+    grid = axis.params.get("grid")
+    if not isinstance(grid, dict):
+        return
+    bounds = [float(v) for v in grid.get("boundaries", [])]
+    if not bounds:
+        return
+    old_center = (min(bounds) + max(bounds)) / 2.0
+    delta = float(center_ev) - old_center
+    grid["boundaries"] = [round(v + delta, 4) for v in bounds]
 
 
 __all__ = [

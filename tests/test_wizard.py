@@ -194,6 +194,30 @@ def test_arc_economy_defaults_off():
     assert st.to_spec().apparatus.arc_economy is False
 
 
+def test_waxs_arc_change_uses_q_planner_bounds():
+    st = WizardState(q_waxs_start_deg=10.0, q_waxs_end_deg=50.0, q_waxs_tiled=True)
+    st.add_change("motor")
+
+    assert st.axes[0].params["device"] == "waxs.arc"
+    assert st.axes[0].params["values"] == [10.0, 50.0]
+
+
+def test_waxs_arc_change_defaults_to_single_planner_position():
+    st = WizardState(q_waxs_start_deg=10.0, q_waxs_end_deg=50.0)
+    st.add_change("motor")
+
+    assert st.q_waxs_tiled is False
+    assert st.axes[0].params["values"] == [10.0]
+
+
+def test_energy_change_uses_q_planner_energy_as_center():
+    st = WizardState(q_energy_ev=13500.0)
+    st.add_change("energy")
+    bounds = st.axes[0].params["grid"]["boundaries"]
+
+    assert (min(bounds) + max(bounds)) / 2 == 13500.0
+
+
 # ---------------------------------------------------------------------------
 # registry visuals (icons/colors present for every changeable)
 # ---------------------------------------------------------------------------

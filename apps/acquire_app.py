@@ -1267,6 +1267,7 @@ class AcquireApp:
             card.on_click(lambda _e, v=q.value: self._wiz_set_q(v))
             q_row.append(card)
         col.append(q_row)
+        col.append(self._q_range_widget())
 
         # Exposure + names
         exp = pn.widgets.FloatInput(name="Exposure (s)", value=float(st.exposure_s),
@@ -1370,6 +1371,572 @@ class AcquireApp:
     def _wiz_assign(self, attr, value):
         """Set a scalar wizard attribute without a full re-render (avoids losing focus)."""
         setattr(self.wizard, attr, value)
+
+    # ---- q-range planner ------------------------------------------------
+    def _q_range_widget(self):
+        from smi_acquire.q_range import (
+            QRangeConfig,
+            d_spacing_nm_range,
+            detector_directional_ranges,
+            detector_ranges,
+            waxs_center_allowed,
+        )
+        st = self.wizard
+        cfg = QRangeConfig(
+            energy_ev=float(st.q_energy_ev),
+            saxs_distance_m=float(st.q_saxs_distance_m),
+            waxs_start_deg=float(st.q_waxs_start_deg),
+            waxs_end_deg=float(st.q_waxs_end_deg),
+            waxs_tiled=bool(st.q_waxs_tiled),
+        )
+
+        def _cfg():
+            return QRangeConfig(
+                energy_ev=float(st.q_energy_ev),
+                saxs_distance_m=float(st.q_saxs_distance_m),
+                waxs_start_deg=float(st.q_waxs_start_deg),
+                waxs_end_deg=float(st.q_waxs_end_deg),
+                waxs_tiled=bool(st.q_waxs_tiled),
+            )
+
+        def _summary_html(current):
+            rows = detector_directional_ranges(current, st.q)
+            overall = {r.detector: r for r in detector_ranges(current, st.q)}
+            summary_rows = []
+            by_detector = {}
+            for r in rows:
+                by_detector.setdefault((r.detector, r.label), []).append(r)
+                d_min, d_max = d_spacing_nm_range(r.q_low, r.q_high)
+                summary_rows.append(
+                    "<tr><td><b>{}</b></td><td>{}</td><td>{:.2f} to {:.2f} deg</td>"
+                    "<td>{:.4f} to {:.3f} 1/Å</td><td>{}</td></tr>".format(
+                        r.label,
+                        r.axis,
+                        r.angular.low_deg,
+                        r.angular.high_deg,
+                        r.q_low,
+                        r.q_high,
+                        self._q_d_spacing_label(d_min, d_max)))
+            for (_detector, label), detector_rows in by_detector.items():
+                angle_low = min(r.angular.low_deg for r in detector_rows)
+                angle_high = max(r.angular.high_deg for r in detector_rows)
+                overall_row = overall.get(_detector)
+                q_low = overall_row.q_low if overall_row else min(r.q_low for r in detector_rows)
+                q_high = overall_row.q_high if overall_row else max(r.q_high for r in detector_rows)
+                d_min, d_max = d_spacing_nm_range(q_low, q_high)
+                summary_rows.append(
+                    "<tr style='background:#ECEFF1'><td><b>{} overall</b></td><td>q</td>"
+                    "<td>{:.2f} to {:.2f} deg</td><td>{:.4f} to {:.3f} 1/Å</td>"
+                    "<td>{}</td></tr>".format(
+                        label, angle_low, angle_high, q_low, q_high,
+                        self._q_d_spacing_label(d_min, d_max)))
+            return (
+                "<table style='width:100%;border-collapse:collapse;font-size:13px'>"
+                "<thead><tr style='color:#546E7A;text-align:left'><th>Detector</th>"
+                "<th>row</th><th>visible angle</th><th>q range</th><th>d-spacing</th>"
+                "</tr></thead><tbody>{}</tbody>"
+                "</table>".format("".join(summary_rows)))
+
+        angle_box = pn.Column(self._q_range_angle_map(cfg, st.q), sizing_mode="stretch_width")
+        legend_box = self._q_range_shared_legend(st.q)
+        schematic_box = pn.Column(self._q_range_top_schematic(cfg, st.q), sizing_mode="stretch_width")
+        summary = pn.pane.HTML(_summary_html(cfg))
+        waxs_status = pn.pane.Markdown("")
+
+        saxs = pn.widgets.FloatSlider(
+            name="SAXS distance (m)", start=1.6, end=9.3, step=0.05,
+            value=float(st.q_saxs_distance_m), width=260)
+        wstart = pn.widgets.FloatSlider(
+            name="WAXS first center (deg)", start=-20.0, end=70.0, step=1.0,
+            value=float(st.q_waxs_start_deg), width=260)
+        wend = pn.widgets.FloatSlider(
+            name="WAXS last center (deg)", start=-20.0, end=70.0, step=1.0,
+            value=float(st.q_waxs_end_deg), width=260, disabled=not bool(st.q_waxs_tiled))
+        wtiled = pn.widgets.Checkbox(name="Multiple WAXS positions", value=bool(st.q_waxs_tiled))
+        energy = pn.widgets.FloatSlider(
+            name="Energy (eV)", start=2000.0, end=25000.0, step=50.0,
+            value=float(st.q_energy_ev), width=260)
+
+        def _update(attr, value):
+            if attr == "q_waxs_tiled":
+                setattr(st, attr, bool(value))
+                wend.disabled = not bool(value)
+            else:
+                setattr(st, attr, float(value))
+            if attr in {"q_waxs_start_deg", "q_waxs_end_deg", "q_waxs_tiled"}:
+                for name, widget in (("first", wstart), ("last", wend)):
+                    if widget.disabled:
+                        continue
+                    if not waxs_center_allowed(widget.value):
+                        widget.value = 15.0 if widget.value > 12.0 else 9.0
+                        waxs_status.object = (
+                            f"WAXS {name} center adjusted out of the disallowed 10-14 deg range."
+                        )
+                st.q_waxs_start_deg = float(wstart.value)
+                st.q_waxs_end_deg = float(wend.value)
+            if attr in {"q_waxs_start_deg", "q_waxs_end_deg", "q_waxs_tiled"}:
+                self._sync_q_waxs_axis()
+            elif attr == "q_energy_ev":
+                self._sync_q_energy_axis()
+            current = _cfg()
+            angle_box[0] = self._q_range_angle_map(current, st.q)
+            schematic_box[0] = self._q_range_top_schematic(current, st.q)
+            summary.object = _summary_html(current)
+
+        saxs.param.watch(lambda e: _update("q_saxs_distance_m", e.new), "value")
+        wstart.param.watch(lambda e: _update("q_waxs_start_deg", e.new), "value")
+        wend.param.watch(lambda e: _update("q_waxs_end_deg", e.new), "value")
+        wtiled.param.watch(lambda e: _update("q_waxs_tiled", e.new), "value")
+        energy.param.watch(lambda e: _update("q_energy_ev", e.new), "value")
+
+        linked = []
+        if self._waxs_axis_index() is not None:
+            linked.append("WAXS arc motor values")
+        if self._energy_axis_index() is not None:
+            linked.append("energy axis center")
+        link_text = (("linked to: " + ", ".join(linked)) if linked else
+                     "add Energy or WAXS arc as scan changes to link these planning values "
+                     "into the recipe")
+        controls = pn.Column(
+            pn.pane.HTML("<b>Live planning controls</b><br>"
+                         "<span style='color:#607D8B;font-size:12px'>{}</span>".format(
+                             link_text)),
+            pn.Row(saxs, energy),
+            pn.Row(wstart, wend, wtiled),
+            waxs_status,
+            sizing_mode="stretch_width",
+        )
+        return pn.Column(
+            pn.pane.HTML(
+                "<h3 style='margin-bottom:2px'>q-range planner</h3>"
+                "<div style='color:#546E7A'>Drag the beamline geometry and energy to see what "
+                "SAXS/WAXS angles and q are available before composing the scan.</div>"),
+            pn.Row(angle_box, legend_box, schematic_box, sizing_mode="stretch_width"),
+            summary,
+            controls,
+            styles={"background": "linear-gradient(135deg,#F8FBFF,#FFF8EE)",
+                    "padding": "12px", "border-radius": "14px",
+                    "border": "1px solid #DCE8F5", "box-shadow": "0 2px 12px #B0BEC533"},
+            sizing_mode="stretch_width",
+        )
+
+    def _q_range_angle_map(self, cfg, q_selection):
+        from math import cos, pi, sin, sqrt
+
+        from smi_acquire.q_range import (
+            detector_directional_ranges,
+            detector_ranges,
+            waxs_tile_half_width_deg,
+        )
+        try:
+            from bokeh.plotting import figure
+            from bokeh.models import Span, Label
+        except Exception:
+            return pn.pane.HTML("<i>(install bokeh for q-range diagrams)</i>")
+        rows = detector_directional_ranges(cfg, q_selection)
+        radial = {r.detector: r for r in detector_ranges(cfg, q_selection)}
+        by_detector = {}
+        for row in rows:
+            by_detector.setdefault(row.detector, {})[row.axis] = row
+        fig = figure(
+            title="Angular acceptance: horizontal vs vertical",
+            height=300, width=500, toolbar_location=None, tools="",
+            x_range=(-25, 75), y_range=(-12, 50),
+            x_axis_label="horizontal angle qx (deg)", y_axis_label="vertical angle qy (deg)")
+        fig.xgrid.grid_line_alpha = 0.20
+        fig.ygrid.grid_line_alpha = 0.20
+        fig.add_layout(Span(location=0, dimension="height", line_color="#263238", line_width=1))
+        fig.add_layout(Span(location=0, dimension="width", line_color="#263238", line_width=1))
+        if "pil2M" in by_detector:
+            qx = by_detector["pil2M"].get("qx")
+            qy = by_detector["pil2M"].get("qy")
+            if qx and qy:
+                self._q_draw_edge_box(
+                    fig, qx.angular.low_deg, qx.angular.high_deg,
+                    qy.angular.low_deg, qy.angular.high_deg,
+                    core_color="#42A5F5", edge_color="#BBDEFB", line_color="#1E88E5",
+                    legend_label="SAXS Pilatus 2M")
+                fig.add_layout(Label(x=qx.angular.high_deg + 1, y=qy.angular.high_deg,
+                                     text="SAXS", text_font_size="10px", text_color="#1565C0"))
+                saxs_radial = radial.get("pil2M")
+                if saxs_radial:
+                    radius = saxs_radial.angular.high_deg
+                    theta = [2.0 * pi * i / 120.0 for i in range(121)]
+                    fig.line([radius * cos(t) for t in theta], [radius * sin(t) for t in theta],
+                             line_color="#1565C0", line_dash="dashed", line_width=2,
+                             alpha=0.75, legend_label="SAXS radial max q")
+        if "pil900KW" in by_detector:
+            qx = by_detector["pil900KW"].get("qx")
+            qy = by_detector["pil900KW"].get("qy")
+            if qx and qy:
+                palette = self._q_waxs_palette()
+                centers = self._q_waxs_centers(cfg)
+                half_width = waxs_tile_half_width_deg()
+                for i, center in enumerate(centers):
+                    kwargs = {"legend_label": "WAXS tiles"} if i == 0 else {}
+                    left = center - half_width
+                    right = center + half_width
+                    fig.quad(left=[left], right=[right], bottom=[qy.angular.low_deg],
+                             top=[qy.angular.high_deg], color=palette[i % len(palette)],
+                             alpha=0.62, line_color="#6D4C41", **kwargs)
+                    self._q_draw_waxs_dead_regions(fig, left, right, qy.angular.low_deg,
+                                                   qy.angular.high_deg)
+                    if 14.0 <= center < 18.0:
+                        shadow_kwargs = ({"legend_label": "WAXS shadow on SAXS"}
+                                         if i == 0 else {})
+                        fig.quad(left=[left - 3.5], right=[left], bottom=[qy.angular.low_deg],
+                                 top=[qy.angular.high_deg], color="#6D4C41", alpha=0.24,
+                                 line_color="#3E2723", line_dash="dotted", **shadow_kwargs)
+                    saxs_radial = radial.get("pil2M")
+                    if saxs_radial:
+                        xs, ys = self._q_overlap_lens(
+                            center - half_width, center + half_width,
+                            qy.angular.low_deg, qy.angular.high_deg, saxs_radial.angular.high_deg,
+                            sqrt)
+                        if xs and ys:
+                            overlap_kwargs = ({"legend_label": "SAXS/WAXS q overlap"}
+                                              if i == 0 else {})
+                            fig.patch(xs, ys, color="#7E57C2", alpha=0.62,
+                                      line_color="#4527A0", **overlap_kwargs)
+                if centers:
+                    fig.quad(left=[min(centers) - half_width],
+                             right=[max(centers) + half_width],
+                             bottom=[qy.angular.low_deg], top=[qy.angular.high_deg],
+                             fill_alpha=0.0, line_color="#3E2723", line_dash="dashed",
+                             line_width=2, legend_label="WAXS full rough range")
+                fig.add_layout(Label(x=qx.angular.high_deg + 1, y=qy.angular.high_deg - 4,
+                                     text="WAXS", text_font_size="10px", text_color="#6D4C41"))
+        fig.circle([0], [0], radius=0.4, color="#263238", alpha=0.65,
+                   legend_label="direct beam / beamstop")
+        fig.legend.location = "top_left"
+        fig.legend.visible = False
+        return pn.pane.Bokeh(fig, sizing_mode="fixed")
+
+    def _q_range_top_schematic(self, cfg, q_selection):
+        from math import atan, cos, log10, pi, sin, tan
+
+        from smi_acquire.q_range import detector_ranges, waxs_tile_half_width_deg
+
+        try:
+            from bokeh.plotting import figure
+            from bokeh.models import FixedTicker, Span, Label
+        except Exception:
+            return pn.pane.HTML("<i>(install bokeh for q-range diagrams)</i>")
+
+        def xplot(distance_m):
+            # Pseudo-log compression: keep the sample at zero while making the near WAXS arc
+            # and far SAXS detector legible in one schematic.
+            return log10(1.0 + max(float(distance_m), 0.0) / 0.15)
+
+        def ray_curve(angle_deg, distance_m, n=80):
+            slope = tan(angle_deg * pi / 180.0)
+            xs_real = [float(distance_m) * i / (n - 1) for i in range(n)]
+            return [xplot(x) for x in xs_real], [slope * x for x in xs_real]
+
+        meter_ticks = [0.0, 0.25, 0.5, 1.0, 2.0, 5.0, 9.3]
+        tick_positions = [xplot(v) for v in meter_ticks]
+        fig = figure(
+            title="Top-down schematic: sample, scattering cone, detectors",
+            height=220, width=760, toolbar_location=None, tools="",
+            x_range=(-0.05, xplot(9.8) + 0.05), y_range=(-0.3, 0.2),
+            x_axis_label="distance downstream (m, compressed)",
+            y_axis_label="horizontal offset (m)")
+        fig.xaxis.ticker = FixedTicker(ticks=tick_positions)
+        fig.xaxis.major_label_overrides = {
+            pos: ("0" if val == 0 else "{:g}".format(val))
+            for pos, val in zip(tick_positions, meter_ticks)
+        }
+        fig.xgrid.grid_line_alpha = 0.18
+        fig.ygrid.grid_line_alpha = 0.18
+        fig.add_layout(Span(location=0, dimension="width", line_color="#ECEFF1", line_width=1))
+        fig.line([xplot(0), xplot(9.5)], [0, 0], line_color="#263238", line_width=2,
+                 line_alpha=0.75)
+        fig.scatter([xplot(0)], [0], marker="circle", size=14, color="#263238",
+                    legend_label="sample")
+        radial = {r.detector: r for r in detector_ranges(cfg, q_selection)}
+        if q_selection in {"both", "saxs"}:
+            x_saxs = float(cfg.saxs_distance_m)
+            x_saxs_plot = xplot(x_saxs)
+            half_width = 0.2537 / 2.0
+            saxs_edge_angle = 180.0 / pi * atan(half_width / x_saxs)
+            fig.quad(left=[x_saxs_plot - 0.015], right=[x_saxs_plot + 0.015],
+                     bottom=[-half_width], top=[half_width],
+                     color="#42A5F5", alpha=0.35, line_color="#1E88E5",
+                     legend_label="SAXS detector")
+            xs, ys = ray_curve(saxs_edge_angle, x_saxs)
+            fig.line(xs, ys, line_color="#42A5F5", line_dash="dashed", alpha=0.75)
+            xs, ys = ray_curve(-saxs_edge_angle, x_saxs)
+            fig.line(xs, ys, line_color="#42A5F5", line_dash="dashed", alpha=0.75)
+            saxs_radial = radial.get("pil2M")
+            if saxs_radial:
+                xs, ys = ray_curve(saxs_radial.angular.high_deg, x_saxs)
+                fig.line(xs, ys, line_color="#1565C0", line_dash="dotdash", alpha=0.80,
+                         legend_label="SAXS radial max q")
+                xs, ys = ray_curve(-saxs_radial.angular.high_deg, x_saxs)
+                fig.line(xs, ys, line_color="#1565C0", line_dash="dotdash", alpha=0.80)
+            fig.circle([x_saxs_plot], [0], radius=0.015, color="#263238", alpha=0.75)
+            fig.add_layout(Label(x=x_saxs_plot - 0.16, y=0.30, text="SAXS {:.1f} m".format(
+                                 cfg.saxs_distance_m),
+                                 text_font_size="10px", text_color="#1565C0"))
+        if q_selection in {"both", "waxs"}:
+            centers = self._q_waxs_centers(cfg)
+            waxs_radius = 0.273
+            waxs_depth = 0.08
+            half_width = waxs_tile_half_width_deg()
+            palette = self._q_waxs_palette()
+
+            def wedge_patch(inner_radius, outer_radius, start_angle, end_angle):
+                n = 24
+                outer = [start_angle + (end_angle - start_angle) * j / (n - 1) for j in range(n)]
+                inner = list(reversed(outer))
+                xs = ([xplot(outer_radius * cos(t)) for t in outer]
+                      + [xplot(inner_radius * cos(t)) for t in inner])
+                ys = ([outer_radius * sin(t) for t in outer]
+                      + [inner_radius * sin(t) for t in inner])
+                return xs, ys
+
+            for i, center in enumerate(centers):
+                # Mirror the drawing convention so positive WAXS angles appear on the expected
+                # side in this top-down beamline view.
+                start = -(center + half_width) * pi / 180.0
+                end = -(center - half_width) * pi / 180.0
+                kwargs = {"legend_label": "WAXS arc positions"} if i == 0 else {}
+                inner_radius = waxs_radius - waxs_depth / 2.0
+                outer_radius = waxs_radius + waxs_depth / 2.0
+                xs, ys = wedge_patch(inner_radius, outer_radius, start, end)
+                fig.patch(xs, ys, color=palette[i % len(palette)], alpha=0.54,
+                          line_color="#6D4C41", **kwargs)
+                if 14.0 <= center < 18.0:
+                    shadow_high = center - half_width
+                    shadow_low = shadow_high - 3.5
+                    shadow_start = -shadow_high * pi / 180.0
+                    shadow_end = -shadow_low * pi / 180.0
+                    xs, ys = wedge_patch(inner_radius, outer_radius, shadow_start, shadow_end)
+                    shadow_kwargs = ({"legend_label": "WAXS shadow on SAXS"}
+                                     if i == 0 else {})
+                    fig.patch(xs, ys, color="#6D4C41", alpha=0.28, line_color="#3E2723",
+                              line_dash="dotted", **shadow_kwargs)
+                    if radial.get("pil2M") is not None:
+                        x_saxs = float(cfg.saxs_distance_m)
+                        xs1, ys1 = ray_curve(-shadow_high, x_saxs)
+                        xs2, ys2 = ray_curve(-shadow_low, x_saxs)
+                        fig.patch(xs1 + list(reversed(xs2)), ys1 + list(reversed(ys2)),
+                                  color="#6D4C41", alpha=0.14, line_color="#3E2723",
+                                  line_dash="dotted")
+                saxs_radial = radial.get("pil2M")
+                if saxs_radial:
+                    tile_low = center - half_width
+                    tile_high = center + half_width
+                    overlap_low = max(tile_low, 0.0)
+                    overlap_high = min(tile_high, saxs_radial.angular.high_deg)
+                    if overlap_high > overlap_low:
+                        overlap_start = -overlap_high * pi / 180.0
+                        overlap_end = -overlap_low * pi / 180.0
+                        xs, ys = wedge_patch(inner_radius, outer_radius,
+                                             overlap_start, overlap_end)
+                        overlap_kwargs = ({"legend_label": "SAXS/WAXS q overlap"}
+                                          if i == 0 else {})
+                        fig.patch(xs, ys, color="#7E57C2", alpha=0.72,
+                                  line_color="#4527A0", **overlap_kwargs)
+                for edge in (start, end):
+                    radius = waxs_radius + waxs_depth / 2.0
+                    # Draw physical ray curves under the compressed x-coordinate transform.
+                    edge_deg = -edge * 180.0 / pi
+                    xs, ys = ray_curve(-edge_deg, radius * cos(edge))
+                    fig.line(xs, ys, line_color=palette[i % len(palette)], line_alpha=0.38)
+            mid = -((float(cfg.waxs_start_deg) + float(cfg.waxs_end_deg)) / 2.0) * pi / 180.0
+            fig.add_layout(Label(x=xplot(0.42 * cos(mid)), y=0.42 * sin(mid) - 0.18,
+                                 text="WAXS arc tiles (~0.25 m real radius)", text_font_size="10px",
+                                 text_color="#6D4C41"))
+        fig.legend.location = "top_left"
+        fig.legend.visible = False
+        return pn.pane.Bokeh(fig, sizing_mode="fixed")
+
+    @staticmethod
+    def _q_range_shared_legend(q_selection):
+        entries = []
+        if q_selection in {"both", "saxs"}:
+            entries.extend([
+                ("#42A5F5", "SAXS detector"),
+                ("#BBDEFB", "SAXS outer 10%"),
+                ("#1565C0", "SAXS radial max q", "border-top:2px dashed #1565C0"),
+            ])
+        if q_selection in {"both", "waxs"}:
+            waxs_swatches = "".join(
+                "<span style='display:inline-block;width:12px;height:12px;background:{};"
+                "border:1px solid #6D4C41;margin-right:2px'></span>".format(c)
+                for c in AcquireApp._q_waxs_palette()[:4]
+            )
+            entries.extend([
+                (waxs_swatches, "WAXS tiles"),
+                ("#6D4C41", "WAXS shadow on SAXS", "border:2px dotted #3E2723"),
+                ("#7E57C2", "SAXS/WAXS q overlap"),
+            ])
+        entries.append(("#263238", "direct beam / sample"))
+
+        rows = []
+        for item in entries:
+            swatch, label = item[0], item[1]
+            extra = item[2] if len(item) > 2 else "border:1px solid #455A64"
+            if swatch.startswith("#"):
+                swatch_html = (
+                    "<span style='display:inline-block;width:18px;height:12px;background:{};{};"
+                    "margin-right:7px;vertical-align:-1px'></span>".format(swatch, extra)
+                )
+            else:
+                swatch_html = "<span style='display:inline-block;margin-right:7px'>{}</span>".format(
+                    swatch)
+            rows.append("<div style='margin:7px 0;white-space:nowrap'>{}{}</div>".format(
+                swatch_html, label))
+        return pn.pane.HTML(
+            "<div style='font-size:12px;color:#37474F;padding:8px 10px;border-radius:10px;"
+            "background:#FFFFFFCC;border:1px solid #CFD8DC;min-width:150px'>"
+            "<b>Legend</b>{}</div>".format("".join(rows)),
+            width=185,
+            margin=(28, 8, 0, 8),
+        )
+
+    @staticmethod
+    def _q_draw_waxs_dead_regions(fig, left, right, bottom, top):
+        # Bundled smi-tiled WAXS mask rectangles are in the detector's 619 x 1475 raw
+        # coordinates. WAXS display orientation is effectively arr.T, so transpose the
+        # mask before mapping it onto angular qx/qy. Draw only large structural regions;
+        # hot pixels are too small for this overview.
+        regions = [
+            (980, 988, 0, 619),      # module gaps, raw coordinates
+            (486, 494, 0, 619),
+            (0, 1475, 405, 424),
+            (0, 1475, 193, 211),
+        ]
+        raw_width_px = 1475.0
+        raw_height_px = 619.0
+        for x0, x1, y0, y1 in regions:
+            # raw (x, y) -> display (x'=y, y'=x)
+            x_left = float(left) + (float(y0) / raw_height_px) * (float(right) - float(left))
+            x_right = float(left) + (float(y1) / raw_height_px) * (float(right) - float(left))
+            y_bottom = float(bottom) + (float(x0) / raw_width_px) * (float(top) - float(bottom))
+            y_top = float(bottom) + (float(x1) / raw_width_px) * (float(top) - float(bottom))
+            fig.quad(left=[x_left], right=[x_right], bottom=[y_bottom], top=[y_top],
+                     color="#263238", alpha=0.38, line_color="#263238")
+
+    @staticmethod
+    def _q_waxs_palette():
+        return ["#E65100", "#7B1FA2", "#F9A825", "#C62828", "#00897B", "#5D4037"]
+
+    @staticmethod
+    def _q_overlap_lens(left, right, bottom, top, radius, sqrt):
+        x0 = max(float(left), -float(radius))
+        x1 = min(float(right), float(radius))
+        if x1 <= x0:
+            return [], []
+        n = 36
+        xs = [x0 + (x1 - x0) * i / (n - 1) for i in range(n)]
+        upper = []
+        lower = []
+        for x in xs:
+            y = sqrt(max(float(radius) ** 2 - x ** 2, 0.0))
+            y_hi = min(float(top), y)
+            y_lo = max(float(bottom), -y)
+            if y_hi < y_lo:
+                return [], []
+            upper.append(y_hi)
+            lower.append(y_lo)
+        return xs + list(reversed(xs)), upper + list(reversed(lower))
+
+    @staticmethod
+    def _q_draw_edge_box(
+        fig,
+        left,
+        right,
+        bottom,
+        top,
+        *,
+        core_color,
+        edge_color,
+        line_color,
+        legend_label=None,
+    ):
+        width = max(float(right) - float(left), 0.0)
+        height = max(float(top) - float(bottom), 0.0)
+        dx = width * 0.10
+        dy = height * 0.10
+        core_left = float(left) + dx
+        core_right = float(right) - dx
+        core_bottom = float(bottom) + dy
+        core_top = float(top) - dy
+        kwargs = {"legend_label": legend_label} if legend_label else {}
+        fig.quad(left=[left], right=[right], bottom=[bottom], top=[top],
+                 color=edge_color, alpha=0.58, line_color=line_color, **kwargs)
+        fig.quad(left=[core_left], right=[core_right], bottom=[core_bottom], top=[core_top],
+                 color=core_color, alpha=0.72, line_color=line_color)
+
+    @staticmethod
+    def _q_d_spacing_label(d_min, d_max):
+        if d_min is None and d_max is None:
+            return "n/a"
+        if d_max is None:
+            return "{:.3g} nm to ∞".format(d_min)
+        return "{:.3g} to {:.3g} nm".format(d_min, d_max)
+
+    @staticmethod
+    def _q_waxs_centers(cfg):
+        from smi_acquire.q_range import waxs_tile_half_width_deg
+
+        start = float(cfg.waxs_start_deg)
+        end = float(cfg.waxs_end_deg)
+        if not bool(getattr(cfg, "waxs_tiled", False)):
+            return [start]
+        if abs(end - start) < 1e-9:
+            return [start]
+        step = 2.0 * waxs_tile_half_width_deg()
+        step = step if end >= start else -step
+        vals = []
+        cur = start
+        while (cur <= end if step > 0 else cur >= end):
+            vals.append(round(cur, 6))
+            cur += step
+        if vals[-1] != end:
+            vals.append(end)
+        return vals
+
+    def _q_range_set(self, attr, value):
+        setattr(self.wizard, attr, float(value))
+        if attr in {"q_waxs_start_deg", "q_waxs_end_deg"}:
+            self._sync_q_waxs_axis()
+        elif attr == "q_energy_ev":
+            self._sync_q_energy_axis()
+
+    def _waxs_axis_index(self):
+        for i, ax in enumerate(self.wizard.axes):
+            if ax.type == "motor" and ax.params.get("device") == "waxs.arc":
+                return i
+        return None
+
+    def _energy_axis_index(self):
+        for i, ax in enumerate(self.wizard.axes):
+            if ax.type == "energy":
+                return i
+        return None
+
+    def _sync_q_waxs_axis(self):
+        idx = self._waxs_axis_index()
+        if idx is None:
+            return
+        st = self.wizard
+        st.axes[idx].params["values"] = st.q_waxs_values()
+
+    def _sync_q_energy_axis(self):
+        idx = self._energy_axis_index()
+        if idx is None:
+            return
+        ax = self.wizard.axes[idx]
+        center = float(self.wizard.q_energy_ev)
+        grid = self._energy_grid(ax)
+        bounds = [float(v) for v in grid["boundaries"]]
+        old_center = (min(bounds) + max(bounds)) / 2.0 if bounds else center
+        delta = center - old_center
+        grid["boundaries"] = [round(v + delta, 4) for v in bounds]
+        ax.params.pop("list_name", None)
 
     # ==================================================================
     # STEP 2 — Change (iconic toggle cards)
