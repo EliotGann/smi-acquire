@@ -21,6 +21,7 @@ from tornado.httpclient import AsyncHTTPClient, HTTPRequest, HTTPClientError
 from tornado.web import Application, HTTPError, RequestHandler, StaticFileHandler
 
 from .commissioning import Commissioning, Refused, Rejected, idle_blocker
+from .queue_controls import DemoQueue, QueueControls, available
 
 
 def summarize(item):
@@ -39,6 +40,7 @@ class QueueMonitor:
     def __init__(self, get, controls=None):
         self.get = get
         self.controls = controls
+        self.queue_controls = None
         self.state = {'mode': 'live monitor', 'connected': False, 'console': '',
                       'queue': [], 'history': [], 'errors': {}}
         self.versions = {}
@@ -64,6 +66,8 @@ class QueueMonitor:
             state.update(connected=False, idle=False, errors={'status': read_error(exc)})
             return
         blocker = idle_blocker(status)
+        state.update(queue_actions=available(status), stop_pending=status.get('queue_stop_pending'),
+                     pause_pending=status.get('pause_pending'))
         state.update(connected=True, idle=blocker is None, idle_blocker=blocker, manager=status.get('manager_state'),
                      re=status.get('re_state'), environment=status.get('worker_environment_state'),
                      count=status.get('items_in_queue'), updated=time.time())
@@ -88,7 +92,10 @@ class QueueMonitor:
                 state[name] = [summarize(i) for i in (items[:100] if name == 'queue'
                                                       else reversed(items[-100:]))]
                 if name == 'queue':
-                    state['running'] = (data.get('running_item') or {}).get('name')
+                    running = data.get('running_item') or {}
+                    # Bind buttons to the list actually displayed, not a newer status poll.
+                    state.update(running=running.get('name'), running_uid=running.get('item_uid'),
+                                 queue_revision=data.get(version))
                 self.versions[name] = data.get(version)
             except (OSError, HTTPClientError, KeyError, ValueError) as exc:
                 errors[name] = read_error(exc)
@@ -125,15 +132,21 @@ def live_transport(uri, key):
     async def get(path):
         return await request(path)
 
-    async def immediate(item):
+    async def post(path, body):
         try:
-            return await request('queue/item/execute', {'item': item})
+            result = await request(path, body)
+            if result.get('success') is not True:
+                raise ValueError('Missing acknowledgement')
+            return result
         except HTTPClientError as exc:
             if exc.code in {400, 401, 403, 404, 405, 422}:
-                raise Rejected(f'HTTP {exc.code}: immediate plan rejected') from exc
-            raise OSError('Immediate-plan response unavailable') from exc
+                raise Rejected(f'HTTP {exc.code}: request rejected') from exc
+            raise OSError('Manager response unavailable') from exc
 
-    return get, immediate, client.close
+    async def immediate(item):
+        return await post('queue/item/execute', {'item': item})
+
+    return get, immediate, post, client.close
 
 
 class Simulator:
@@ -147,13 +160,14 @@ class Simulator:
         self.log = deque(['Simulated worker ready.'], maxlen=100)
         self.controls = Commissioning(self.get, self.immediate, exposure='sim_exposure',
                                      axis='sim_x', step=.1, units='sim units')
+        self.demo = DemoQueue(self.history, self.log)
+        self.queue_controls = QueueControls(self.get, self.demo.post, self.controls)
 
     async def get(self, path):
         return {'plans/allowed': {'plans_allowed': {'mv': {}, 'mvr': {}}},
                 'devices/allowed': {'devices_allowed': {s.name: {'is_movable': True}
                                                         for s in (self.x, self.exposure)}},
-                'status': dict(manager_state='idle', re_state='idle', worker_environment_exists=True,
-                               worker_environment_state='idle')}[path]
+                'status': self.demo.status()}[path]
 
     async def immediate(self, item):
         import bluesky.plan_stubs as bps
@@ -175,8 +189,13 @@ class Simulator:
 
     @property
     def state(self):
-        return dict(mode='simulation', manager='idle', re='idle', environment='idle',
-                    connected=True, idle=True, queue=[], count=0, history=list(self.history), errors={},
+        s = self.demo.status()
+        return dict(mode='simulation', manager=s['manager_state'], re=s['re_state'],
+                    environment=s['worker_environment_state'], queue_actions=available(s),
+                    queue_revision=s['plan_queue_uid'], running_uid=s['running_item_uid'],
+                    running=(self.demo.running or {}).get('name'), stop_pending=s['queue_stop_pending'],
+                    pause_pending=s['pause_pending'], connected=True, idle=idle_blocker(s) is None,
+                    queue=self.demo.items, count=len(self.demo.items), history=list(self.history), errors={},
                     console='\n'.join(self.log))
 
     def image(self):
@@ -265,6 +284,8 @@ class API(RequestHandler):
             stamp = (time.monotonic() if isinstance(backend, Simulator) else
                      (self.settings['cache'].get('rbv') or (None, 0))[1])
             self.write(dict(backend.state, capabilities=ctrl.caps if ctrl else None,
+                            queue_enabled=bool(backend.queue_controls),
+                            queue_message=backend.queue_controls.message if backend.queue_controls else '',
                             command=ctrl.command if ctrl else None, exposure_rbv=rbv,
                             confirmation=ctrl.exposure_confirmation(rbv, stamp) if ctrl else None))
         elif resource == 'frame' and (frame := self.settings['cache'].get('frame')):
@@ -275,6 +296,26 @@ class API(RequestHandler):
 
     async def post(self, resource):
         backend = self.settings['backend']
+        if resource == 'queue-action':
+            if not backend.queue_controls:
+                raise HTTPError(405)
+            try:
+                body = json.loads(self.request.body)
+                message = await backend.queue_controls.run(body['action'], body['expected'])
+                if isinstance(backend, Simulator) and backend.controls.caps is None:
+                    await backend.controls.discover()
+            except (Refused, Rejected) as exc:
+                self.set_status(409)
+                self.write({'error': str(exc)})
+                return
+            except (KeyError, TypeError, json.JSONDecodeError):
+                raise HTTPError(400)
+            except (OSError, ValueError, HTTPClientError):
+                self.set_status(503)
+                self.write({'error': 'Manager response unavailable; check current status'})
+                return
+            self.write({'message': message})
+            return
         if not backend.controls or resource not in {'jog', 'exposure'}:
             raise HTTPError(405)
         try:
@@ -300,12 +341,14 @@ async def serve(args):
     cache = {}
     try:
         if args.live_camera_config:
-            get, immediate, finish = live_transport(os.environ['QSERVER_HTTP_SERVER_URI'],
+            get, immediate, post, finish = live_transport(os.environ['QSERVER_HTTP_SERVER_URI'],
                                         os.environ['QSERVER_HTTP_SERVER_API_KEY'])
             close.append(finish)
             backend = QueueMonitor(get)
             backend.controls = Commissioning(backend.read, immediate, exposure=args.exposure_device,
                                              axis=args.jog_axis, step=args.jog_step, units=args.jog_units)
+            if args.queue_controls:
+                backend.queue_controls = QueueControls(backend.read, post, backend.controls)
             camera = LiveCamera(args.live_camera_config)
             close.append(camera.stream.close)
             tasks.append(asyncio.create_task(poll(backend)))
@@ -345,6 +388,8 @@ if __name__ == '__main__':
     parser.add_argument('--jog-axis', help='One verified sample-stage worker motor')
     parser.add_argument('--jog-step', type=float, help='Fixed relative step in installed motor units')
     parser.add_argument('--jog-units', help='Verified units of the configured motor')
+    parser.add_argument('--queue-controls', action='store_true',
+                        help='Enable queue start/stop, RunEngine pause/resume and idle worker reload')
     try:
         asyncio.run(serve(parser.parse_args()))
     except KeyboardInterrupt:

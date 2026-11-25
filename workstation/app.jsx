@@ -98,6 +98,34 @@ function Items({title, items = []}) {
         <strong>{i.name}</strong> {i.outcome} {i.message}<small>{i.uid}</small></li>)}</ol> : <p>No items.</p>}</section>;
 }
 
+const queueButtons = [
+    ['start','Start queue'], ['stop-after','Stop after current item'], ['cancel-stop','Cancel scheduled stop'],
+    ['pause-deferred','Pause at checkpoint'], ['pause-immediate','Pause immediately'],
+    ['resume','Resume plan'], ['reload','Reload idle environment'],
+];
+
+function QueuePanel({state}) {
+    const [busy,setBusy] = useState(false), [notice,setNotice] = useState('');
+    async function issue(action) {
+        setBusy(true); setNotice('Sending request…');
+        try {
+            const expected = ['start','reload'].includes(action) ? state.queue_revision : state.running_uid;
+            const response = await request('queue-action', undefined, 'POST', {action, expected});
+            setNotice((await response.json()).message);
+        } catch (err) {setNotice(err.message);}
+        finally {setBusy(false);}
+    }
+    return <section><h2>Queue & RunEngine controls</h2>
+        <p>Running item: {state.running_uid ? `${state.running || 'Plan'} · ${state.running_uid}` : 'none'}
+            {state.stop_pending && ' · Queue will stop after this item'}{state.pause_pending && ' · Pause requested'}</p>
+        {state.queue_enabled ? <>{queueButtons.map(([action,label]) =>
+            <button key={action} disabled={busy || !!state.errors.queue || !state.queue_actions?.includes(action)}
+                onClick={()=>issue(action)}>{label}</button>)}
+            <output aria-live="polite">{notice}</output>
+            {state.queue_message !== notice && <small>{state.queue_message}</small>}</> :
+            <p>Monitoring only. Launch with <code>--queue-controls</code> to enable these actions.</p>}</section>;
+}
+
 function App() {
     const [page, navigate] = useState('Camera');
     const [state, error] = usePoll('state', 1000);
@@ -110,6 +138,7 @@ function App() {
                     onClick={() => navigate(tab)}>{tab}</button></details>)}</details></nav>
         <main><h1>{page}</h1>{page === 'Camera' ? <Camera state={state}/> : state?.connected ? <>
             <Capabilities caps={state.capabilities}/>
+            <QueuePanel state={state}/>
             {!state.errors.queue && <Items title="Pending queue" items={state.queue}/>}
             {!state.errors.history && <Items title="Recent history" items={state.history}/>}
             <section><h2>RunEngine output</h2><pre>{state.errors.console ? 'Console unavailable' : state.console || 'Waiting for output…'}</pre></section>

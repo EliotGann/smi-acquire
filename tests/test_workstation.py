@@ -80,7 +80,7 @@ def test_live_submission_uses_only_immediate_endpoint_and_preserves_metadata(mon
     client = Mock()
     client.fetch = AsyncMock(return_value=SimpleNamespace(body=b'{"success":true,"item":{"item_uid":"received"}}'))
     monkeypatch.setattr('smi_acquire.workstation.AsyncHTTPClient', lambda **kw: client)
-    _, immediate, close = live_transport('https://example.invalid', 'fixture-key')
+    _, immediate, _, close = live_transport('https://example.invalid', 'fixture-key')
     item = dict(item_type='plan', name='mv', args=['camera.exposure', .1],
                 meta={'smi_acquire_command': 'fixture'})
     assert asyncio.run(immediate(item))['item']['item_uid'] == 'received'
@@ -104,3 +104,17 @@ class TestLocalBoundary(AsyncHTTPTestCase):
         self._app.settings['backend'] = QueueMonitor(None)
         assert self.fetch('/api/jog', method='POST', body='', headers=headers).code == 405
         assert self.fetch('/api/state', headers=headers).code == 200
+
+    def test_queue_action_requires_session_opt_in_and_displayed_revision(self):
+        headers = {'X-Workstation-Session': 'fixture-session'}
+        def start(expected, session=headers):
+            return self.fetch('/api/queue-action', method='POST', headers=session,
+                              body=json.dumps({'action': 'start', 'expected': expected}))
+        snap = json.loads(self.fetch('/api/state', headers=headers).body)
+        assert start(snap['queue_revision'], {}).code == 403
+        assert start('stale').code == 409
+        assert start(snap['queue_revision']).code == 200
+        active = json.loads(self.fetch('/api/state', headers=headers).body)
+        assert active['running_uid'] == snap['queue'][0]['uid']
+        self._app.settings['backend'] = QueueMonitor(None)
+        assert start(snap['queue_revision']).code == 405

@@ -82,3 +82,27 @@ the app loses its local tracking state; it does not cancel a worker plan.
 
 To return to a monitor-only session, omit the device bindings. The existing
 Panel `app` and `app-real` tasks are separate.
+
+## Queue & Console controls
+
+Simulation starts with two 15-second demo items. Start the queue, pause and resume
+the running item, then select **Stop after current item**. The current item should
+finish and appear in history; the next stays pending. **Cancel scheduled stop**
+withdraws that stop before the item finishes. Restart the simulator for fresh items.
+The demo models queue lifecycle; it does not commission a live plan's checkpoints.
+
+In live mode add `--queue-controls` to the normal workstation launcher to enable
+these buttons. This flag is independent of the microscope device bindings; omit
+all three kinds of control options for a monitor-only session. **Start queue**
+starts the shared pending queue, not just a selected plan. **Pause at checkpoint**
+requests a deferred RE pause; **Pause immediately** requests an immediate RE
+pause. Neither is a motor emergency stop. Resume requires a paused plan. The app
+checks fresh manager state and the displayed queue revision or running item UID
+before sending a request; an acknowledgement is not a completed state transition.
+
+**Reload idle environment** requires an idle open worker, autostart off and no
+outstanding workstation move. It closes, waits for closure, opens and waits for
+idle, then refreshes allowed plans/devices. Pending items are not cleared and
+the queue is not started. This does not restart systemd or reload permissions
+from disk. If a request times out or startup fails, inspect manager status and
+worker console before doing anything else; the app does not retry control writes.
