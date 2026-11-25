@@ -49,6 +49,25 @@ must be compared separately from the YAML. `ui.default_step` is a jog choice,
 not a calibration coefficient; the workstation's commissioning jog settings
 are independent of it.
 
+### Commission a reviewed XY move
+
+After the piezo preview agrees with the legacy panel, enable the separate
+**Move piezo XY** button with `--click-move-max-um N` and the same live camera
+YAML. N is a positive per-axis cap in µm (at most 100). Neither `--piezo-jogs`
+nor queue-start permission in the launcher is required. The worker must expose
+`move_piezo_xy` to the workstation login. Huber clicks remain preview-only.
+
+With the stage settled and the worker idle, select a nearby feature, read the
+displayed start, signed ΔX/ΔY and expected target, and press **Move piezo XY**
+once. The preview ID can only be used once and expires after 30 seconds. A new
+preview replaces the old one. Changed image dimensions or chi invalidate the
+review; the worker also checks each origin against its own readback (0.1 µm
+tolerance) and checks both targets before a grouped Bluesky move. Grouping
+does not guarantee both motors reach target in a hardware failure. After UID
+completion, use **Read X/Y now** and compare to the expected target, then check
+the feature moved toward the configured beam center. On a failed/unknown
+result inspect both readbacks before considering any further motion.
+
 1. Launch with the live camera config alone. Open **Queue & Console →
    Capabilities for this workstation login**. Look for `mv`, `mvr`, the
    on-axis camera's exposure setpoint and the intended sample axis. The lists

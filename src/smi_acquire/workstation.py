@@ -230,6 +230,7 @@ class LiveCamera:
         self.epics_cfg = cfg
         self.pose_signals = {}
         self.chi_signals = {}
+        self.xy_signals = {}
         self.display_size = None
         self.stream = CameraStream(Camera.from_config(cfg), None, epics_cfg=cfg,
                                    display_max_dim=self.config.ui.display_max_dim)
@@ -275,6 +276,20 @@ class LiveCamera:
             raise ValueError(f'Invalid {stack} chi readback')
         return angle
 
+    def read_xy(self):
+        from ophyd import EpicsSignalRO
+        for a in ('x', 'y'):
+            if a not in self.xy_signals:
+                pv = self.epics_cfg.piezo_motors.get(a)
+                if not pv:
+                    raise ValueError(f'No piezo {a} readback configured')
+                self.xy_signals[a] = EpicsSignalRO(pv + '.RBV', name='piezo_' + a)
+        xy = [float(self.xy_signals[a].get(use_monitor=False, timeout=1, connection_timeout=1))
+              for a in ('x', 'y')]
+        if not all(map(math.isfinite, xy)):
+            raise ValueError('Invalid piezo XY readback')
+        return xy
+
     def preview(self, stack, x, y, width, height):
         from .microscope.calibration import CalibrationModel
         from numpy.linalg import LinAlgError
@@ -301,6 +316,46 @@ class LiveCamera:
             raise ValueError('Invalid calibration result')
         return dict(stack=stack, x=x, y=y, center=center, chi=chi, dx=float(dx), dy=float(dy),
                     units=cfg.ui.motor_units if stack == 'piezo' else 'mm')
+
+
+class ReviewedXY:
+    """At most one current preview per launcher. Only the opaque ID comes back from the UI."""
+
+    def __init__(self, limit):
+        if not math.isfinite(limit) or not 0 < limit <= 100:
+            raise ValueError('--click-move-max-um must be in (0, 100]')
+        self.limit = limit
+        self.current = None
+
+    async def offer(self, camera, result, size):
+        self.current = None
+        if result['stack'] != 'piezo':
+            return
+        if result['units'] not in ('um', 'µm', 'μm'):
+            result['move_note'] = 'Preview only: calibration units must be micrometres'
+            return
+        dx, dy = result['dx'], result['dy']
+        if max(abs(dx), abs(dy)) > self.limit:
+            result['move_note'] = f'Preview exceeds the {self.limit:g} µm per-axis limit'
+            return
+        x0, y0 = await asyncio.to_thread(camera.read_xy)
+        token = str(uuid4())
+        self.current = (token, time.monotonic(), size, dict(result), [x0, y0, dx, dy])
+        result.update(move_id=token, origin=[x0, y0], target=[x0+dx, y0+dy])
+
+    async def commit(self, camera, controls, token):
+        entry = self.current
+        if not entry or token != entry[0]:
+            raise Refused('Preview replaced or already used; click the current frame')
+        self.current = None  # consume before any await; never replay on timeout
+        _, stamp, size, p, args = entry
+        if time.monotonic() - stamp > 30:
+            raise Refused('Preview expired; click again')
+        latest = await asyncio.to_thread(camera.preview, 'piezo', p['x'], p['y'], *size)
+        if not math.isclose(latest['chi'], p['chi'], abs_tol=.001, rel_tol=0):
+            raise Refused('Chi changed since preview; click again')
+        return await controls.submit_named('move_piezo_xy', args,
+            value=f'ΔX {args[2]:+.4f}, ΔY {args[3]:+.4f} µm')
 
 
 async def update_frame(camera, cache):
@@ -360,6 +415,7 @@ class API(RequestHandler):
             stamp = (time.monotonic() if isinstance(backend, Simulator) else
                      (self.settings['cache'].get('rbv') or (None, 0))[1])
             self.write(dict(backend.state, capabilities=ctrl.caps if ctrl else None,
+                            click_move_enabled=self.settings.get('reviewed_xy') is not None,
                             bookmarks_enabled=getattr(backend, 'bookmarks', None) is not None,
                             bookmark_goto_max_um=getattr(backend, 'bookmark_goto_max_um', None),
                             queue_enabled=bool(backend.queue_controls),
@@ -374,6 +430,9 @@ class API(RequestHandler):
                 result = await asyncio.to_thread(camera.preview, self.get_argument('stack'),
                     float(self.get_argument('x')), float(self.get_argument('y')),
                     int(self.get_argument('width')), int(self.get_argument('height')))
+                review = self.settings.get('reviewed_xy')
+                if review is not None:
+                    await review.offer(camera, result, (int(self.get_argument('width')), int(self.get_argument('height'))))
             except ValueError as exc:
                 self.set_status(409)
                 self.write({'error': str(exc)})
@@ -381,6 +440,11 @@ class API(RequestHandler):
             except (OSError, RuntimeError, TypeError):
                 raise HTTPError(503, reason='Chi readback unavailable')
             self.write(result)
+        elif resource == 'piezo-xy' and self.settings.get('reviewed_xy') is not None:
+            try:
+                self.write({'xy': await asyncio.to_thread(self.settings['live_camera'].read_xy)})
+            except (OSError, RuntimeError, TypeError, ValueError):
+                raise HTTPError(503, reason='XY readback unavailable')
         elif resource == 'bookmarks':
             view = getattr(self.settings['backend'], 'bookmarks', None)
             if view is None:
@@ -401,6 +465,23 @@ class API(RequestHandler):
 
     async def post(self, resource):
         backend = self.settings['backend']
+        if resource == 'click-move':
+            review = self.settings.get('reviewed_xy')
+            if review is None:
+                raise HTTPError(405)
+            try:
+                body = json.loads(self.request.body)
+                if not isinstance(body, dict) or set(body) != {'move_id'}:
+                    raise HTTPError(400)
+                cmd = await review.commit(self.settings['live_camera'], backend.controls, body['move_id'])
+            except (ValueError, KeyError) as exc:
+                self.set_status(409)
+                self.write({'error': str(exc)})
+                return
+            except (OSError, HTTPClientError, RuntimeError, TypeError):
+                raise HTTPError(503)
+            self.write(cmd)
+            return
         if resource == 'bookmark':
             if getattr(backend, 'bookmarks', None) is None:
                 raise HTTPError(405)
@@ -475,6 +556,9 @@ async def serve(args):
     close = []
     tasks = []
     cache = {}
+    review = ReviewedXY(args.click_move_max_um) if args.click_move_max_um is not None else None
+    if review and not args.live_camera_config:
+        raise SystemExit('--click-move-max-um requires the calibrated live camera configuration')
     try:
         if args.live_camera_config:
             get, immediate, post, finish = live_transport(os.environ['QSERVER_HTTP_SERVER_URI'],
@@ -506,6 +590,7 @@ async def serve(args):
         app = Application([(r'/api/([^/]+)', API), (r'/(.*)', StaticFileHandler,
                           {'path': str(root), 'default_filename': 'index.html'})],
                            backend=backend, cache=cache, session_key=key,
+                           reviewed_xy=review,
                            live_camera=camera if args.live_camera_config else None)
         server = app.listen(5097, address='127.0.0.1')
         close.append(server.stop)
@@ -535,6 +620,8 @@ if __name__ == '__main__':
     jog_mode.add_argument('--jog-axis', help='One verified sample-stage worker motor (piezo XYZ: 100 um; theta/chi: 0.1 deg)')
     jog_mode.add_argument('--piezo-jogs', action='store_true', help='Show X/Y/Z and theta/chi in one panel')
     parser.add_argument('--angular-step-deg', type=float, help='Override the 0.1 degree theta/chi jog step')
+    parser.add_argument('--click-move-max-um', type=float,
+                        help='Enable reviewed piezo XY moves up to this per-axis limit (maximum 100 um)')
     parser.add_argument('--jog-step', type=float, help='Fixed relative step in installed motor units')
     parser.add_argument('--jog-units', help='Verified units of the configured motor')
     parser.add_argument('--queue-controls', action='store_true',

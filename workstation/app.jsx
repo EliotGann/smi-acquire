@@ -49,9 +49,11 @@ function Camera({state}) {
     const [seconds, setSeconds] = useState('');
     const [previewStack,setPreviewStack] = useState('piezo'), [previewText,setPreviewText] = useState('');
     const [previewBusy,setPreviewBusy] = useState(false);
+    const [review,setReview] = useState(null), [xyRead,setXYRead] = useState('');
     const live = state?.mode === 'live monitor';
     async function preview(e) {
-        if (!live || previewBusy) return;
+        if (!live || previewBusy || pending) return;
+        setReview(null); setXYRead('');
         const img = e.currentTarget, rect = img.getBoundingClientRect();
         const width = img.naturalWidth, height = img.naturalHeight;
         if (!width || !height || !rect.width || !rect.height) return;
@@ -59,7 +61,8 @@ function Camera({state}) {
         setPreviewBusy(true);
         try {
             const p = await (await request('click-preview?' + new URLSearchParams({stack:previewStack,x,y,width,height}))).json();
-            setPreviewText(`${p.stack} at pixel (${p.x.toFixed(1)}, ${p.y.toFixed(1)}), beam (${p.center.join(', ')}), χ ${p.chi.toFixed(3)}°: Δx ${p.dx.toFixed(4)}, Δy ${p.dy.toFixed(4)} ${p.units}`);
+            setPreviewText(`${p.stack} at pixel (${p.x.toFixed(1)}, ${p.y.toFixed(1)}), beam (${p.center.join(', ')}), χ ${p.chi.toFixed(3)}°: Δx ${p.dx.toFixed(4)}, Δy ${p.dy.toFixed(4)} ${p.units}${p.move_note ? ' · '+p.move_note : ''}`);
+            if (p.move_id) setReview(p);
         } catch (err) {setPreviewText(err.message);}
         finally {setPreviewBusy(false);}
     }
@@ -67,6 +70,21 @@ function Camera({state}) {
     const ready = state?.connected && state?.idle && !pending &&
         !['sending', 'accepted', 'unknown'].includes(command?.state);
     const allowed = (plan, device) => ready && caps?.plans.includes(plan) && caps.movable.includes(device);
+    async function moveXY() {
+        if (!review || pending) return;
+        setReview(null); setPending(true); setXYRead('');
+        try {
+            const cmd = await (await request('click-move', undefined, 'POST', {move_id:review.move_id})).json();
+            setMessage(`XY from (${review.origin.map(v=>v.toFixed(3))}) to (${review.target.map(v=>v.toFixed(3))}) µm: ${cmd.state}`);
+        } catch (err) { setMessage(err.message); }
+        finally {setPending(false);}
+    }
+    async function readXY() {
+        try {
+            const {xy} = await (await request('piezo-xy')).json();
+            setXYRead(`Direct readback at ${new Date().toLocaleTimeString()}: X ${xy[0].toFixed(3)}, Y ${xy[1].toFixed(3)} µm`);
+        } catch (err) {setXYRead(err.message);}
+    }
     const exposureBlocker = !state?.connected ? 'Waiting for QueueServer connection' :
         !caps ? 'Allowed plans and devices unavailable' :
         !caps.exposure ? 'No exposure device bound' :
@@ -86,9 +104,15 @@ function Camera({state}) {
     }
     return <section><h2>On-axis camera</h2><p>{state?.mode === 'simulation' ? 'Synthetic image' : 'Direct EPICS readback'}</p>
         {live && <p><label>Click preview (no motion) <select value={previewStack} disabled={previewBusy}
-            onChange={e=>{setPreviewStack(e.target.value);setPreviewText('');}}><option value="piezo">Piezo XY</option><option value="huber">Huber XY</option></select></label></p>}
+            onChange={e=>{setPreviewStack(e.target.value);setPreviewText('');setReview(null);}}><option value="piezo">Piezo XY</option><option value="huber">Huber XY</option></select></label></p>}
         {url ? <img className="camera" src={url} onClick={preview} alt="Latest on-axis camera frame"/> : <p>{error || 'Waiting for a frame…'}</p>}
         {live && <output aria-live="polite">{previewBusy?'Reading chi…':previewText || 'Click an image feature to preview its displacement.'}</output>}
+        {state?.click_move_enabled && previewStack==='piezo' && <fieldset><legend>Reviewed piezo XY</legend>
+            {review && <p>Start ({review.origin.map(v=>v.toFixed(3)).join(', ')}) → target ({review.target.map(v=>v.toFixed(3)).join(', ')}) µm</p>}
+            <button disabled={!url || !review || previewBusy || !ready || !caps?.plans.includes('move_piezo_xy')} onClick={moveXY}>
+                Move piezo XY{review && ` (ΔX ${review.dx.toFixed(4)}, ΔY ${review.dy.toFixed(4)} µm)`}</button>
+            {!caps?.plans.includes('move_piezo_xy') && <small>Worker plan move_piezo_xy is not available for this login.</small>}
+            <button onClick={readXY}>Read X/Y now</button><output>{xyRead}</output></fieldset>}
         <fieldset><legend>Immediate plans</legend><p>Exposure readback: {state?.exposure_rbv == null ? 'unavailable' : `${state.exposure_rbv} s`}</p>
             <label>Requested exposure (s) <input type="number" min="0.0001" max="2" step="any" value={seconds} onChange={e=>setSeconds(e.target.value)}/></label>
             <button disabled={Boolean(exposureBlocker)}
