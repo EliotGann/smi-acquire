@@ -50,6 +50,15 @@ function Camera({state}) {
     const ready = state?.connected && state?.idle && !pending &&
         !['sending', 'accepted', 'unknown'].includes(command?.state);
     const allowed = (plan, device) => ready && caps?.plans.includes(plan) && caps.movable.includes(device);
+    const exposureBlocker = !state?.connected ? 'Waiting for QueueServer connection' :
+        !caps ? 'Allowed plans and devices unavailable' :
+        !caps.exposure ? 'No exposure device bound' :
+        !caps.plans.includes('mv') ? 'mv is not allowed' :
+        !caps.movable.includes(caps.exposure) ? `${caps.exposure} is not listed as movable` :
+        pending ? 'Sending request' : !state.idle ? state.idle_blocker || 'Worker not ready' :
+        !ready ? `Previous command: ${command.state}; check history` :
+        state.exposure_rbv == null ? 'Exposure readback unavailable' :
+        !(+seconds >= .0001 && +seconds <= 2) ? 'Enter 0.0001 to 2 seconds' : '';
     async function send(action, value) {
         setPending(true);
         try {
@@ -62,8 +71,9 @@ function Camera({state}) {
         {url ? <img className="camera" src={url} alt="Latest on-axis camera frame"/> : <p>{error || 'Waiting for a frame…'}</p>}
         <fieldset><legend>Immediate plans</legend><p>Exposure readback: {state?.exposure_rbv == null ? 'unavailable' : `${state.exposure_rbv} s`}</p>
             <label>Requested exposure (s) <input type="number" min="0.0001" max="2" step="any" value={seconds} onChange={e=>setSeconds(e.target.value)}/></label>
-            <button disabled={!allowed('mv', caps?.exposure) || state?.exposure_rbv == null || !(+seconds >= .0001 && +seconds <= 2)}
+            <button disabled={Boolean(exposureBlocker)}
                 onClick={()=>send('exposure', +seconds)}>Set exposure</button>
+            {exposureBlocker && <small>{exposureBlocker}</small>}
             {caps?.axis && <p>{[-1,1].map(sign=><button key={sign} disabled={!allowed('mvr', caps.axis)} onClick={()=>send('jog', sign*caps.step)}>
                 Jog {caps.axis} {sign>0?'+':'−'}{caps.step} {caps.units}</button>)}</p>}
             <output>{message}</output>{command && <p role="status">{command.plan} {command.device} {command.value}: {command.state} {command.outcome} {command.message}

@@ -82,3 +82,15 @@ def test_rejection_and_out_of_bounds_have_distinct_results():
     send.assert_not_awaited()
     send.side_effect = Rejected('denied')
     assert asyncio.run(ctl.submit('jog', .01))['state'] == 'rejected'
+
+
+@pytest.mark.parametrize('kernel', ['disabled', 'busy', 'starting'])
+def test_python_worker_ready_but_active_kernel_blocks(kernel):
+    ctl, replies, send = fixture()
+    replies['status']['ip_kernel_state'] = kernel
+    if kernel == 'disabled':
+        assert asyncio.run(ctl.submit('exposure', .2, exposure_rbv=1))['state'] == 'accepted'
+    else:
+        with pytest.raises(Refused, match=kernel):
+            asyncio.run(ctl.submit('exposure', .2, exposure_rbv=1))
+        send.assert_not_awaited()

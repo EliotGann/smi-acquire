@@ -15,14 +15,22 @@ class Rejected(ValueError):
     """The manager explicitly rejected a submitted item."""
 
 
-def idle(status):
-    return (status.get('worker_environment_exists') is True
-            and all(status.get(key) == 'idle' for key in
-                    ('manager_state', 'worker_environment_state', 're_state'))
-            and not status.get('running_item_uid')
-            and status.get('ip_kernel_state') in (None, 'idle')
-            and not status.get('worker_background_tasks')
-            and not (status.get('lock') or {}).get('environment'))
+def idle_blocker(status):
+    if status.get('worker_environment_exists') is not True:
+        return 'Worker environment is not open'
+    for key in ('manager_state', 'worker_environment_state', 're_state'):
+        if status.get(key) != 'idle':
+            return f'{key}: {status.get(key) or "unknown"}'
+    if status.get('running_item_uid'):
+        return 'An item is running'
+    # In a Python worker QueueServer explicitly reports the optional kernel as disabled.
+    if status.get('ip_kernel_state') not in (None, 'idle', 'disabled'):
+        return f'IPython kernel: {status["ip_kernel_state"]}'
+    if status.get('worker_background_tasks'):
+        return 'Worker has background tasks'
+    if (status.get('lock') or {}).get('environment'):
+        return 'Worker environment is locked'
+    return None
 
 
 def device_names(tree, prefix=''):
@@ -82,8 +90,9 @@ class Commissioning:
             caps = await self.discover()
             if plan not in caps['plans'] or device not in caps['movable']:
                 raise Refused('Required plan or movable device is not allowed for this login')
-            if not idle(await self.get('status')):
-                raise Refused('The worker must be open, unlocked and idle')
+            blocker = idle_blocker(await self.get('status'))
+            if blocker:
+                raise Refused(blocker)
             tag = str(uuid4())
             self.finished_at = None
             self.command = dict(state='sending', plan=plan, device=device, value=value,

@@ -20,7 +20,7 @@ from PIL import Image, ImageDraw
 from tornado.httpclient import AsyncHTTPClient, HTTPRequest, HTTPClientError
 from tornado.web import Application, HTTPError, RequestHandler, StaticFileHandler
 
-from .commissioning import Commissioning, Refused, Rejected, idle
+from .commissioning import Commissioning, Refused, Rejected, idle_blocker
 
 
 def summarize(item):
@@ -63,7 +63,8 @@ class QueueMonitor:
         except (OSError, HTTPClientError, ValueError) as exc:
             state.update(connected=False, idle=False, errors={'status': read_error(exc)})
             return
-        state.update(connected=True, idle=idle(status), manager=status.get('manager_state'),
+        blocker = idle_blocker(status)
+        state.update(connected=True, idle=blocker is None, idle_blocker=blocker, manager=status.get('manager_state'),
                      re=status.get('re_state'), environment=status.get('worker_environment_state'),
                      count=status.get('items_in_queue'), updated=time.time())
         revision = (status.get('plans_allowed_uid'), status.get('devices_allowed_uid'))
