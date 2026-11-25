@@ -3,6 +3,8 @@
 import asyncio
 from io import BytesIO
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 from PIL import Image
 import pytest
@@ -46,9 +48,9 @@ def test_monitor_caches_revisions_and_distinguishes_console_loss_from_queue_loss
 def test_simulated_plans_affect_readbacks_images_and_history():
     sim = Simulator()
     before = sim.image().tobytes()
-    sim.execute('jog')
+    asyncio.run(sim.controls.submit('jog', .1))
     after_move = sim.image().tobytes()
-    sim.execute('exposure')
+    asyncio.run(sim.controls.submit('exposure', .2, exposure_rbv=.1))
     assert sim.x.get() == .1 and sim.exposure.get() == .2
     assert before != after_move != sim.image().tobytes()
     assert [i['name'] for i in sim.state['history']] == ['mv', 'mvr']
@@ -74,6 +76,21 @@ def test_reject_cleartext_upstream_before_using_key():
         live_transport('http://localhost', 'unused')
 
 
+def test_live_submission_uses_only_immediate_endpoint_and_preserves_metadata(monkeypatch):
+    client = Mock()
+    client.fetch = AsyncMock(return_value=SimpleNamespace(body=b'{"success":true,"item":{"item_uid":"received"}}'))
+    monkeypatch.setattr('smi_acquire.workstation.AsyncHTTPClient', lambda **kw: client)
+    _, immediate, close = live_transport('https://example.invalid', 'fixture-key')
+    item = dict(item_type='plan', name='mv', args=['camera.exposure', .1],
+                meta={'smi_acquire_command': 'fixture'})
+    assert asyncio.run(immediate(item))['item']['item_uid'] == 'received'
+    req = client.fetch.await_args.args[0]
+    assert req.url == 'https://example.invalid/api/queue/item/execute'
+    assert req.method == 'POST' and json.loads(req.body) == {'item': item}
+    assert req.headers['Authorization'] == 'ApiKey fixture-key' and not req.follow_redirects
+    close()
+
+
 class TestLocalBoundary(AsyncHTTPTestCase):
     def get_app(self):
         return Application([(r'/api/([^/]+)', API)], backend=Simulator(),
@@ -82,8 +99,8 @@ class TestLocalBoundary(AsyncHTTPTestCase):
     def test_immediate_action_needs_session_and_live_mode_refuses_it(self):
         headers = {'X-Workstation-Session': 'fixture-session'}
         assert self.fetch('/api/jog', method='POST', body='').code == 403
-        response = self.fetch('/api/jog', method='POST', body='', headers=headers)
-        assert json.loads(response.body)['history'][0]['name'] == 'mvr'
+        response = self.fetch('/api/jog', method='POST', body='{"value":0.1}', headers=headers)
+        assert json.loads(response.body)['outcome'] == 'completed'
         self._app.settings['backend'] = QueueMonitor(None)
         assert self.fetch('/api/jog', method='POST', body='', headers=headers).code == 405
         assert self.fetch('/api/state', headers=headers).code == 200

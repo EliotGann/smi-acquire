@@ -9,7 +9,7 @@ pixi run python -m smi_acquire.workstation
 ```
 
 The launcher opens the local browser. The default is completely simulated:
-click **Jog X +0.1** or **Toggle exposure** to run a Bluesky `mvr` or `mv` on
+use **Jog sim_x** or enter seconds and click **Set exposure** to run `mvr` or `mv` on
 an in-memory signal. The synthetic camera shows the result. Open **RunEngine →
 Queue & Console** for the simulated history and messages. This exercises the
 UI and plan types, not an external manager or its permissions. Ctrl-C exits.
@@ -37,9 +37,48 @@ An unavailable console is reported independently of the manager connection.
 The API key stays in Python; a separate launch-scoped token protects the local
 API. Stop the launcher before changing operator sessions.
 
-Compare the monitor with the workstation queue-monitor and the camera viewer.
-Live mode exposes no mutation endpoints in this first slice. The legacy
-`pixi run app` / `app-real` tasks retain their original behavior. Before adding
-live controls, verify allowed plans/devices for the authenticated group and
-the physical axis/camera bindings. Immediate-plan completion must be correlated
-by item UID; a queue acknowledgement or console line is not completion.
+## Commission one exposure, then one jog
+
+1. Launch with the live camera config alone. Open **Queue & Console →
+   Capabilities for this workstation login**. Look for `mv`, `mvr`, the
+   on-axis camera's exposure setpoint and the intended sample axis. The lists
+   are the HTTP server's response for this key, without a group override.
+   Verify the worker plan accepts a device name and number. If a plan or
+   component is missing, review its worker registration, discovery depth and
+   group permissions before changing the profile. No local EPICS write fallback.
+2. Check the camera prefix against the worker device's write PV; its
+   `AcquireTime` must correspond to the displayed camera's `AcquireTime_RBV`.
+   A name appearing in the allowed list alone cannot establish that identity.
+   For the trial, give QueueServer exclusive control; an idle worker cannot
+   establish that an independent BSUI session is idle.
+3. Set `CAMERA_CONFIG` to the verified YAML path and `EXPOSURE_DEVICE` to the
+   verified **worker device name**, then restart with only exposure enabled:
+
+   ```bash
+   pixi run --locked python -m smi_acquire.workstation \
+     --live-camera-config "${CAMERA_CONFIG:?Set the microscope YAML path}" \
+     --exposure-device "${EXPOSURE_DEVICE:?Set the verified worker signal}"
+   ```
+
+   Note the original readback. Pick a different suitable value in the existing
+   0.0001–2 s UI range. Check `finished / completed` for the item UID **and**
+   `Exposure RBV: matches request` from a subsequent direct read. A mismatch
+   may indicate IOC rounding or a binding problem. Restore the original value
+   and verify both again (if outside the UI range, defer the trial).
+4. After exposure commissioning, verify one sample axis's installed mapping,
+   limits, native units and motion direction. To enable that axis, also pass
+   `--jog-axis "$JOG_DEVICE" --jog-step "$JOG_STEP" --jog-units "$JOG_UNITS"`
+   with reviewed values. Buttons request exactly ± that step. Observe the
+   physical axis readback separately. Positive means positive in the installed
+   motor coordinates; no camera or beamline-frame sign conversion is applied.
+
+Commands use **immediate plan execution**, never queue insertion. Closed, busy,
+locked or unknown worker state refuses the request. New clicks are blocked while
+an item is unresolved. `accepted` is not completion. After a lost acknowledgement
+the app shows `unknown` and searches history for the unique command tag to recover
+the worker-assigned UID; it never retries a move. If history cannot resolve it,
+check the separate queue-monitor and actual readback before restarting. Restarting
+the app loses its local tracking state; it does not cancel a worker plan.
+
+To return to a monitor-only session, omit the device bindings. The existing
+Panel `app` and `app-real` tasks are separate.

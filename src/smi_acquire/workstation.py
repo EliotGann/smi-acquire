@@ -1,4 +1,4 @@
-"""Workstation monitor. Live mode has a GET-only QueueServer transport."""
+"""Workstation monitor with explicitly bound immediate QueueServer controls."""
 
 import argparse
 import asyncio
@@ -6,6 +6,7 @@ from collections import deque
 from io import BytesIO
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import secrets
@@ -18,6 +19,8 @@ import webbrowser
 from PIL import Image, ImageDraw
 from tornado.httpclient import AsyncHTTPClient, HTTPRequest, HTTPClientError
 from tornado.web import Application, HTTPError, RequestHandler, StaticFileHandler
+
+from .commissioning import Commissioning, Refused, Rejected, idle
 
 
 def summarize(item):
@@ -33,8 +36,9 @@ def read_error(exc):
 class QueueMonitor:
     """One monitor per workstation process; browser tabs share cached snapshots."""
 
-    def __init__(self, get):
+    def __init__(self, get, controls=None):
         self.get = get
+        self.controls = controls
         self.state = {'mode': 'live monitor', 'connected': False, 'console': '',
                       'queue': [], 'history': [], 'errors': {}}
         self.versions = {}
@@ -57,11 +61,19 @@ class QueueMonitor:
         try:
             status = await self.read('status')
         except (OSError, HTTPClientError, ValueError) as exc:
-            state.update(connected=False, errors={'status': read_error(exc)})
+            state.update(connected=False, idle=False, errors={'status': read_error(exc)})
             return
-        state.update(connected=True, manager=status.get('manager_state'),
+        state.update(connected=True, idle=idle(status), manager=status.get('manager_state'),
                      re=status.get('re_state'), environment=status.get('worker_environment_state'),
                      count=status.get('items_in_queue'), updated=time.time())
+        revision = (status.get('plans_allowed_uid'), status.get('devices_allowed_uid'))
+        if self.controls and (self.controls.caps is None or self.versions.get('caps') != revision):
+            try:
+                await self.controls.discover()
+                self.versions['caps'] = revision
+            except (OSError, HTTPClientError, KeyError, ValueError) as exc:
+                self.controls.caps = None
+                errors['capabilities'] = read_error(exc)
         for name, path, version in [('queue', 'queue/get', 'plan_queue_uid'),
                                     ('history', 'history/get', 'plan_history_uid')]:
             uid = status.get(version)
@@ -70,6 +82,8 @@ class QueueMonitor:
             try:
                 data = await self.read(path)
                 items = data['items']
+                if name == 'history' and self.controls:
+                    self.controls.reconcile(items)
                 state[name] = [summarize(i) for i in (items[:100] if name == 'queue'
                                                       else reversed(items[-100:]))]
                 if name == 'queue':
@@ -92,17 +106,33 @@ def live_transport(uri, key):
         raise ValueError('Configure an HTTPS QueueServer URI and workstation API key')
     client = AsyncHTTPClient(force_instance=True, max_buffer_size=8 * 1024 * 1024)
 
-    async def get(path):
+    async def request(path, body=None):
         request = HTTPRequest(f'{uri.rstrip("/")}/api/{path}',
-                              headers={'Authorization': f'ApiKey {key}'},
+                              headers={'Authorization': f'ApiKey {key}', 'Content-Type': 'application/json'},
+                              method='GET' if body is None else 'POST',
+                              body=None if body is None else json.dumps(body),
                               follow_redirects=False, connect_timeout=2, request_timeout=5)
         response = await client.fetch(request)
         data = json.loads(response.body)
-        if not isinstance(data, dict) or data.get('success') is False:
-            raise ValueError('QueueServer rejected read')
+        if not isinstance(data, dict):
+            raise ValueError('Malformed response')
+        if data.get('success') is False:
+            reason = str(data.get('msg') or 'QueueServer rejected request')
+            raise Rejected(reason.replace(key, '[redacted]')[:500])
         return data
 
-    return get, client.close
+    async def get(path):
+        return await request(path)
+
+    async def immediate(item):
+        try:
+            return await request('queue/item/execute', {'item': item})
+        except HTTPClientError as exc:
+            if exc.code in {400, 401, 403, 404, 405, 422}:
+                raise Rejected(f'HTTP {exc.code}: immediate plan rejected') from exc
+            raise OSError('Immediate-plan response unavailable') from exc
+
+    return get, immediate, client.close
 
 
 class Simulator:
@@ -114,27 +144,38 @@ class Simulator:
         self.exposure = Signal(name='sim_exposure', value=0.1)
         self.history = deque(maxlen=100)
         self.log = deque(['Simulated worker ready.'], maxlen=100)
+        self.controls = Commissioning(self.get, self.immediate, exposure='sim_exposure',
+                                     axis='sim_x', step=.1, units='sim units')
 
-    def execute(self, action):
+    async def get(self, path):
+        return {'plans/allowed': {'plans_allowed': {'mv': {}, 'mvr': {}}},
+                'devices/allowed': {'devices_allowed': {s.name: {'is_movable': True}
+                                                        for s in (self.x, self.exposure)}},
+                'status': dict(manager_state='idle', re_state='idle', worker_environment_exists=True,
+                               worker_environment_state='idle')}[path]
+
+    async def immediate(self, item):
         import bluesky.plan_stubs as bps
-        if action == 'jog':
-            name = 'mvr'
-            self.engine(bps.mvr(self.x, 0.1))
+        name, (device, value) = item['name'], item['args']
+        if (name, device) == ('mvr', self.x.name):
+            self.engine(bps.mvr(self.x, value))
             message = f'Simulated stage X = {self.x.get():.2f}'
-        elif action == 'exposure':
-            name = 'mv'
-            self.engine(bps.mv(self.exposure, 0.2 if self.exposure.get() == 0.1 else 0.1))
+        elif (name, device) == ('mv', self.exposure.name):
+            self.engine(bps.mv(self.exposure, value))
             message = f'Simulated camera exposure = {self.exposure.get():.1f} s'
         else:
             raise ValueError('Unknown simulator action')
         uid = str(uuid4())
-        self.history.appendleft(dict(uid=uid, name=name, outcome='completed', message=message))
+        completed = dict(item, item_uid=uid, result=dict(exit_status='completed', msg=message))
+        self.history.appendleft(summarize(completed))
+        self.controls.reconcile([completed])
         self.log.append(message)
+        return {'item': completed}
 
     @property
     def state(self):
         return dict(mode='simulation', manager='idle', re='idle', environment='idle',
-                    connected=True, queue=[], count=0, history=list(self.history), errors={},
+                    connected=True, idle=True, queue=[], count=0, history=list(self.history), errors={},
                     console='\n'.join(self.log))
 
     def image(self):
@@ -153,6 +194,10 @@ class LiveCamera:
         cfg = load_config(config).epics
         self.stream = CameraStream(Camera.from_config(cfg), None, epics_cfg=cfg)
         self.pva = cfg.image_protocol.lower() == 'pva'
+
+    def exposure_readback(self):
+        sig = self.stream.camera.cam.acquire_time_rbv
+        return float(sig.get(use_monitor=False, timeout=1, connection_timeout=1))
 
     def image(self):
         rgb = self.stream.grab_rgb()
@@ -187,7 +232,24 @@ async def poll(monitor):
         await asyncio.sleep(delay)
 
 
+async def monitor_exposure(camera, cache):
+    while True:
+        try:
+            started = time.monotonic()
+            value = await asyncio.to_thread(camera.exposure_readback)
+            cache['rbv'] = (value, started) if math.isfinite(value) else None
+        except (OSError, RuntimeError, ValueError, TypeError):
+            cache['rbv'] = None
+        await asyncio.sleep(1 if cache['rbv'] else 5)
+
+
 class API(RequestHandler):
+    def readback(self, backend):
+        if isinstance(backend, Simulator):
+            return backend.exposure.get()
+        rbv = self.settings['cache'].get('rbv')
+        return rbv[0] if rbv and time.monotonic() - rbv[1] < 4 else None
+
     def prepare(self):
         key = self.settings['session_key']
         if not secrets.compare_digest(self.request.headers.get('X-Workstation-Session', ''), key):
@@ -196,19 +258,36 @@ class API(RequestHandler):
 
     def get(self, resource):
         if resource == 'state':
-            self.write(self.settings['backend'].state)
+            backend = self.settings['backend']
+            ctrl = backend.controls
+            rbv = self.readback(backend)
+            stamp = (time.monotonic() if isinstance(backend, Simulator) else
+                     (self.settings['cache'].get('rbv') or (None, 0))[1])
+            self.write(dict(backend.state, capabilities=ctrl.caps if ctrl else None,
+                            command=ctrl.command if ctrl else None, exposure_rbv=rbv,
+                            confirmation=ctrl.exposure_confirmation(rbv, stamp) if ctrl else None))
         elif resource == 'frame' and (frame := self.settings['cache'].get('frame')):
             self.set_header('Content-Type', 'image/jpeg')
             self.finish(frame)
         else:
             raise HTTPError(503 if resource == 'frame' else 404)
 
-    def post(self, resource):
+    async def post(self, resource):
         backend = self.settings['backend']
-        if not isinstance(backend, Simulator) or resource not in {'jog', 'exposure'}:
+        if not backend.controls or resource not in {'jog', 'exposure'}:
             raise HTTPError(405)
-        backend.execute(resource)
-        self.write(backend.state)
+        try:
+            value = json.loads(self.request.body)['value']
+            cmd = await backend.controls.submit(resource, value, exposure_rbv=self.readback(backend))
+        except Refused as exc:
+            self.set_status(409)
+            self.write({'error': str(exc)})
+            return
+        except (ValueError, KeyError, TypeError, OverflowError):
+            raise HTTPError(400)
+        except (HTTPClientError, OSError):
+            raise HTTPError(503)
+        self.write(cmd)
 
 
 async def serve(args):
@@ -220,15 +299,19 @@ async def serve(args):
     cache = {}
     try:
         if args.live_camera_config:
-            get, finish = live_transport(os.environ['QSERVER_HTTP_SERVER_URI'],
+            get, immediate, finish = live_transport(os.environ['QSERVER_HTTP_SERVER_URI'],
                                         os.environ['QSERVER_HTTP_SERVER_API_KEY'])
             close.append(finish)
             backend = QueueMonitor(get)
+            backend.controls = Commissioning(backend.read, immediate, exposure=args.exposure_device,
+                                             axis=args.jog_axis, step=args.jog_step, units=args.jog_units)
             camera = LiveCamera(args.live_camera_config)
             close.append(camera.stream.close)
             tasks.append(asyncio.create_task(poll(backend)))
+            tasks.append(asyncio.create_task(monitor_exposure(camera, cache)))
         else:
             camera = backend = Simulator()
+            await backend.controls.discover()
         tasks.append(asyncio.create_task(update_frame(camera, cache)))
         key = secrets.token_urlsafe(32)
         app = Application([(r'/api/([^/]+)', API), (r'/(.*)', StaticFileHandler,
@@ -257,6 +340,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--live-camera-config', type=Path, metavar='PATH',
                         help='Opt into live reads using this microscope config; default: simulation')
+    parser.add_argument('--exposure-device', help='Verified worker setpoint for the configured camera (seconds)')
+    parser.add_argument('--jog-axis', help='One verified sample-stage worker motor')
+    parser.add_argument('--jog-step', type=float, help='Fixed relative step in installed motor units')
+    parser.add_argument('--jog-units', help='Verified units of the configured motor')
     try:
         asyncio.run(serve(parser.parse_args()))
     except KeyboardInterrupt:

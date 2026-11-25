@@ -6,9 +6,11 @@ const token = location.hash.slice(1) || sessionStorage.getItem('session');
 if (token) sessionStorage.setItem('session', token);
 history.replaceState(null, '', location.pathname);
 
-async function request(path, signal, method = 'GET') {
+async function request(path, signal, method = 'GET', body) {
     const response = await fetch(`/api/${path}`, {method, signal, cache: 'no-store',
-        headers: {'X-Workstation-Session': token || ''}});
+        body: body && JSON.stringify(body),
+        headers: {'X-Workstation-Session': token || '', 'Content-Type': 'application/json'}});
+    if (response.status === 409) throw Error((await response.json()).error);
     if (!response.ok) throw Error(response.status === 403 ? 'Reopen from workstation launcher' :
         `Unavailable (${response.status})`);
     return response;
@@ -40,23 +42,45 @@ function usePoll(path, period, image = false) {
     return [value, error];
 }
 
-function Camera({simulation}) {
+function Camera({state}) {
     const [url, error] = usePoll('frame', 300, true);
     const [message, setMessage] = useState(''), [pending, setPending] = useState(false);
-    async function simulate(action) {
+    const [seconds, setSeconds] = useState('');
+    const caps = state?.capabilities, command = state?.command;
+    const ready = state?.connected && state?.idle && !pending &&
+        !['sending', 'accepted', 'unknown'].includes(command?.state);
+    const allowed = (plan, device) => ready && caps?.plans.includes(plan) && caps.movable.includes(device);
+    async function send(action, value) {
         setPending(true);
         try {
-            const state = await (await request(action, undefined, 'POST')).json();
-            setMessage(state.history[0].message);
+            const cmd = await (await request(action, undefined, 'POST', {value})).json();
+            setMessage(`Request ${cmd.tag}: ${cmd.state}`);
         } catch (err) { setMessage(err.message); }
         finally {setPending(false);}
     }
-    return <section><h2>On-axis camera</h2><p>{simulation ? 'Synthetic image' : 'Direct EPICS readback'}</p>
+    return <section><h2>On-axis camera</h2><p>{state?.mode === 'simulation' ? 'Synthetic image' : 'Direct EPICS readback'}</p>
         {url ? <img className="camera" src={url} alt="Latest on-axis camera frame"/> : <p>{error || 'Waiting for a frame…'}</p>}
-        {simulation && <fieldset><legend>Simulated immediate plans</legend>
-            <button disabled={pending} onClick={() => simulate('jog')}>Jog X +0.1</button>
-            <button disabled={pending} onClick={() => simulate('exposure')}>Toggle exposure</button>
-            <output>{message}</output></fieldset>}</section>;
+        <fieldset><legend>Immediate plans</legend><p>Exposure readback: {state?.exposure_rbv == null ? 'unavailable' : `${state.exposure_rbv} s`}</p>
+            <label>Requested exposure (s) <input type="number" min="0.0001" max="2" step="any" value={seconds} onChange={e=>setSeconds(e.target.value)}/></label>
+            <button disabled={!allowed('mv', caps?.exposure) || state?.exposure_rbv == null || !(+seconds >= .0001 && +seconds <= 2)}
+                onClick={()=>send('exposure', +seconds)}>Set exposure</button>
+            {caps?.axis && <p>{[-1,1].map(sign=><button key={sign} disabled={!allowed('mvr', caps.axis)} onClick={()=>send('jog', sign*caps.step)}>
+                Jog {caps.axis} {sign>0?'+':'−'}{caps.step} {caps.units}</button>)}</p>}
+            <output>{message}</output>{command && <p role="status">{command.plan} {command.device} {command.value}: {command.state} {command.outcome} {command.message}
+                <small>Item UID: {command.uid || 'not available'}{state.confirmation && ` · Exposure RBV: ${state.confirmation}`}</small></p>}
+        </fieldset></section>;
+}
+
+function Capabilities({caps}) {
+    const [query, setQuery] = useState('');
+    if (!caps) return <p>Allowed lists unavailable.</p>;
+    const devices = caps.devices.filter(d=>d.toLowerCase().includes(query.toLowerCase()));
+    return <details><summary>Capabilities for this workstation login</summary>
+        <p>mv: {caps.plans.includes('mv')?'allowed':'missing'} · mvr: {caps.plans.includes('mvr')?'allowed':'missing'}</p>
+        {[['Exposure', caps.exposure], ['Jog', caps.axis]].map(([label,device])=><p key={label}>{label}: {device ? `${device} (${caps.movable.includes(device)?'movable':'not listed as movable'})` : 'not bound'}</p>)}
+        <details><summary>Allowed plans ({caps.plans.length})</summary>{caps.plans.join(', ')}</details>
+        <label>Find a device <input value={query} onChange={e=>setQuery(e.target.value)} placeholder="e.g. acquire_time"/></label>
+        <p>{devices.length} matches (first 100)</p><pre>{devices.slice(0,100).join('\n')}</pre></details>;
 }
 
 function Items({title, items = []}) {
@@ -74,7 +98,8 @@ function App() {
             {Object.entries({'Align & Samples':'Camera', 'RunEngine':'Queue & Console'}).map(([section, tab]) =>
                 <details key={tab} open><summary>{section}</summary><button aria-current={page === tab ? 'page' : undefined}
                     onClick={() => navigate(tab)}>{tab}</button></details>)}</details></nav>
-        <main><h1>{page}</h1>{page === 'Camera' ? <Camera simulation={state?.mode === 'simulation'}/> : state?.connected ? <>
+        <main><h1>{page}</h1>{page === 'Camera' ? <Camera state={state}/> : state?.connected ? <>
+            <Capabilities caps={state.capabilities}/>
             {!state.errors.queue && <Items title="Pending queue" items={state.queue}/>}
             {!state.errors.history && <Items title="Recent history" items={state.history}/>}
             <section><h2>RunEngine output</h2><pre>{state.errors.console ? 'Console unavailable' : state.console || 'Waiting for output…'}</pre></section>
