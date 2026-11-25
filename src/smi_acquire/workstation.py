@@ -21,6 +21,7 @@ from tornado.httpclient import AsyncHTTPClient, HTTPRequest, HTTPClientError
 from tornado.web import Application, HTTPError, RequestHandler, StaticFileHandler
 
 from .commissioning import Commissioning, Refused, Rejected, idle_blocker
+from .bookmark_view import BookmarkView
 from .queue_controls import DemoQueue, QueueControls, available
 
 
@@ -162,6 +163,12 @@ class Simulator:
                                      axis='sim_x', step=.1, units='sim units')
         self.demo = DemoQueue(self.history, self.log)
         self.queue_controls = QueueControls(self.get, self.demo.post, self.controls)
+        self.records = {}
+        self.bookmarks = BookmarkView(lambda keys: [self.records.get(k) for k in keys])
+        from .bookmark_edit import editor
+        from smi_plans import SampleStore
+        self.bookmarks.edit = editor(lambda keys, update: update(SampleStore(self.records)),
+                                     lambda: dict(piezo_x=self.x.get(), piezo_y=0., piezo_z=0.))
 
     async def get(self, path):
         return {'plans/allowed': {'plans_allowed': {'mv': {}, 'mvr': {}}},
@@ -171,11 +178,13 @@ class Simulator:
 
     async def immediate(self, item):
         import bluesky.plan_stubs as bps
-        name, (device, value) = item['name'], item['args']
-        if (name, device) == ('mvr', self.x.name):
+        name = item['name']
+        if name == 'mvr' and item['args'][0] == self.x.name:
+            value = item['args'][1]
             self.engine(bps.mvr(self.x, value))
             message = f'Simulated stage X = {self.x.get():.2f}'
-        elif (name, device) == ('mv', self.exposure.name):
+        elif name == 'mv' and item['args'][0] == self.exposure.name:
+            value = item['args'][1]
             self.engine(bps.mv(self.exposure, value))
             message = f'Simulated camera exposure = {self.exposure.get():.1f} s'
         else:
@@ -212,12 +221,27 @@ class LiveCamera:
         from .microscope.config import load_config
         from .microscope.devices import Camera
         cfg = load_config(config).epics
+        self.epics_cfg = cfg
+        self.pose_signals = {}
         self.stream = CameraStream(Camera.from_config(cfg), None, epics_cfg=cfg)
         self.pva = cfg.image_protocol.lower() == 'pva'
 
     def exposure_readback(self):
         sig = self.stream.camera.cam.acquire_time_rbv
         return float(sig.get(use_monitor=False, timeout=1, connection_timeout=1))
+
+    def read_pose(self):
+        from ophyd import EpicsSignalRO
+        cfg = self.epics_cfg
+        if not self.pose_signals:
+            signals = {}
+            for stack, motors in [('piezo', cfg.piezo_motors or cfg.motors), ('stage', cfg.stage_motors)]:
+                for axis, record in motors.items():
+                    field = f'{stack}_{axis}'
+                    signals[field] = EpicsSignalRO(record + '.RBV', name=field, auto_monitor=False)
+            self.pose_signals = signals
+        return {k: float(s.get(use_monitor=False, timeout=1, connection_timeout=1))
+                for k, s in self.pose_signals.items()}
 
     def image(self):
         rgb = self.stream.grab_rgb()
@@ -276,7 +300,7 @@ class API(RequestHandler):
             raise HTTPError(403)
         self.set_header('Cache-Control', 'no-store')
 
-    def get(self, resource):
+    async def get(self, resource):
         if resource == 'state':
             backend = self.settings['backend']
             ctrl = backend.controls
@@ -284,10 +308,24 @@ class API(RequestHandler):
             stamp = (time.monotonic() if isinstance(backend, Simulator) else
                      (self.settings['cache'].get('rbv') or (None, 0))[1])
             self.write(dict(backend.state, capabilities=ctrl.caps if ctrl else None,
+                            bookmarks_enabled=getattr(backend, 'bookmarks', None) is not None,
+                            bookmark_goto_max_um=getattr(backend, 'bookmark_goto_max_um', None),
                             queue_enabled=bool(backend.queue_controls),
                             queue_message=backend.queue_controls.message if backend.queue_controls else '',
                             command=ctrl.command if ctrl else None, exposure_rbv=rbv,
                             confirmation=ctrl.exposure_confirmation(rbv, stamp) if ctrl else None))
+        elif resource == 'bookmarks':
+            view = getattr(self.settings['backend'], 'bookmarks', None)
+            if view is None:
+                raise HTTPError(405)
+            try:
+                page = await asyncio.to_thread(view.page, self.get_argument('holder', None),
+                                               int(self.get_argument('offset', '0')))
+            except ValueError as exc:
+                raise HTTPError(400) from exc
+            except Exception as exc:
+                raise HTTPError(503, reason='Shared sample store unavailable') from exc
+            self.write(page)
         elif resource == 'frame' and (frame := self.settings['cache'].get('frame')):
             self.set_header('Content-Type', 'image/jpeg')
             self.finish(frame)
@@ -296,6 +334,36 @@ class API(RequestHandler):
 
     async def post(self, resource):
         backend = self.settings['backend']
+        if resource == 'bookmark':
+            if getattr(backend, 'bookmarks', None) is None:
+                raise HTTPError(405)
+            try:
+                from .bookmark_view import validate_request
+                spec = validate_request(json.loads(self.request.body))
+                if spec['op'] == 'goto':
+                    cap = getattr(backend, 'bookmark_goto_max_um', None)
+                    if not cap:
+                        raise Refused('Bookmark motion was not enabled at launch')
+                    cmd = await backend.controls.submit_named('load_sample',
+                        [spec['holder_id'], spec['sample_id'], spec['updated'], cap], value='goto piezo XYZ')
+                else:
+                    if spec['op'] in ('capture', 'assign'):
+                        if backend.controls.pending or backend.controls.lock.locked():
+                            raise Refused('Wait for the worker and motors to be idle before capture')
+                        async with backend.controls.lock:
+                            if idle_blocker(await backend.controls.get('status')):
+                                raise Refused('Wait for the worker to be idle before capture')
+                            cmd = await asyncio.to_thread(backend.bookmarks.edit, spec)
+                    else:
+                        cmd = await asyncio.to_thread(backend.bookmarks.edit, spec)
+            except (ValueError, TypeError, KeyError) as exc:
+                self.set_status(409)
+                self.write({'error': str(exc)[:500]})
+                return
+            except Exception as exc:
+                raise HTTPError(503, reason='Bookmark operation unavailable; refresh before retry') from exc
+            self.write(cmd)
+            return
         if resource == 'queue-action':
             if not backend.queue_controls:
                 raise HTTPError(405)
@@ -345,11 +413,18 @@ async def serve(args):
                                         os.environ['QSERVER_HTTP_SERVER_API_KEY'])
             close.append(finish)
             backend = QueueMonitor(get)
+            if args.bookmark_goto_max_um is not None:
+                if not args.bookmarks or not math.isfinite(args.bookmark_goto_max_um) or args.bookmark_goto_max_um <= 0:
+                    raise ValueError('--bookmark-goto-max-um requires --bookmarks and a positive travel cap')
+                backend.bookmark_goto_max_um = args.bookmark_goto_max_um
             backend.controls = Commissioning(backend.read, immediate, exposure=args.exposure_device,
                                              axis=args.jog_axis, step=args.jog_step, units=args.jog_units)
             if args.queue_controls:
                 backend.queue_controls = QueueControls(backend.read, post, backend.controls)
             camera = LiveCamera(args.live_camera_config)
+            if args.bookmarks:
+                backend.bookmarks, finish_bookmarks = BookmarkView.live(camera.read_pose)
+                close.append(finish_bookmarks)
             close.append(camera.stream.close)
             tasks.append(asyncio.create_task(poll(backend)))
             tasks.append(asyncio.create_task(monitor_exposure(camera, cache)))
@@ -390,6 +465,10 @@ if __name__ == '__main__':
     parser.add_argument('--jog-units', help='Verified units of the configured motor')
     parser.add_argument('--queue-controls', action='store_true',
                         help='Enable queue start/stop, RunEngine pause/resume and idle worker reload')
+    parser.add_argument('--bookmarks', action='store_true',
+                        help='Browse, capture and edit shared db=2 sample records')
+    parser.add_argument('--bookmark-goto-max-um', type=float,
+                        help='Opt into piezo XYZ bookmark recall with this per-axis travel cap (um)')
     try:
         asyncio.run(serve(parser.parse_args()))
     except KeyboardInterrupt:

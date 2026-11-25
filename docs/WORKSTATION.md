@@ -106,3 +106,46 @@ idle, then refreshes allowed plans/devices. Pending items are not cleared and
 the queue is not started. This does not restart systemd or reload permissions
 from disk. If a request times out or startup fails, inspect manager status and
 worker console before doing anything else; the app does not retry control writes.
+
+## Bookmarks: store edits vs. load plans
+
+The **Align & Samples → Bookmarks** panel uses the existing `smi_plans` sample,
+holder and magazine schema. Live access is opt-in: add `--bookmarks` to the
+working camera launcher. The workstation uses its existing Redis credentials for
+`swaxssamples` in db 2. No QueueServer plan is needed to create a holder, save a
+sample, change notes/project/priority, or set the active sample *intent*. None
+of those edits move hardware or create queue history. Refresh records after
+changes from another application. There is no live-to-simulation fallback.
+
+Commission first without any motion binding:
+
+1. Use the simulator to create a uniquely named holder, expand it, enter a new
+   sample name, and **Capture new sample here**. Select the sample by ID, save
+   a notes field, and refresh. Simulator records last for the process lifetime.
+2. On ws1 launch with `--bookmarks`, select/create an agreed commissioning holder,
+   wait for the stage to settle, and capture one distinctly named sample. Compare
+   the saved native motor readings with the beamline display. Capture reads the
+   configured motor-record `.RBV` fields directly, sequentially (not an atomic
+   hardware snapshot). Missing configured readbacks abort capture. Recorded
+   machine coordinates have `frame="lab"`; they are not holder-relative offsets.
+   Piezo chi has no Position field in schema 1, so it is stored as capture metadata.
+3. Inspect the same holder/sample ID in the legacy client or via `SampleStore`;
+   edit a note and refresh the other client. No worker reload is needed for this
+   test. Writes use Redis WATCH/MULTI for linked records. Concurrent/stale edits
+   require refreshing and reselecting the record. If the connection is lost
+   during a save, refresh before retrying. **Set active intent** is not a mount
+   operation. Replace nominal only when all configured axes are appropriate;
+   the app refuses to replace a sample's nominal position if a refined pose exists.
+
+After deploying the separate worker profile update, check for `load_sample` in
+allowed plans. The QueueServer item takes **holder ID, sample ID, reviewed
+sample.updated, and maximum per-axis piezo travel in µm**, not browser-supplied
+coordinates. The worker resolves the shared record at execution, checks the
+recorded measurement holder and version, and delegates to `smi_plans._core.goto_sample`
+with explicit device bindings. This first load uses only the absolute piezo XYZ
+of the refined (else nominal) position. It does not rotate, move the Huber,
+transfer a holder, or update active intent. Verify the physical holder and axes
+independently. Enable the button only after Y/Z and available travel are checked,
+with `--bookmarks --bookmark-goto-max-um VALUE` for a chosen displacement cap.
+If the store has no measurement holder, leave recall disabled until staff
+verify and register the physically mounted holder through the existing workflow.

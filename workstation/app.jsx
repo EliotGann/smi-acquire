@@ -1,6 +1,7 @@
 import React, {useEffect, useState} from 'react';
 import {createRoot} from 'react-dom/client';
 import FinchHeader from 'finch-header';
+import Bookmarks from './Bookmarks';
 
 const token = location.hash.slice(1) || sessionStorage.getItem('session');
 if (token) sessionStorage.setItem('session', token);
@@ -133,10 +134,10 @@ function App() {
         <div className="status" role="status">{state?.connected ? `Manager: ${state.manager} · RE: ${state.re || '—'} · Worker: ${state.environment || '—'} · Pending: ${state.count} · Running: ${state.running || 'none'}` : error || 'QueueServer disconnected'}
             {Object.entries(state?.errors || {}).map(([key, msg]) => <span key={key}> · {key}: {msg} (data unavailable)</span>)}</div>
         <div className="workspace"><nav aria-label="Workstation tools"><details open><summary>Acquisition</summary>
-            {Object.entries({'Align & Samples':'Camera', 'RunEngine':'Queue & Console'}).map(([section, tab]) =>
-                <details key={tab} open><summary>{section}</summary><button aria-current={page === tab ? 'page' : undefined}
-                    onClick={() => navigate(tab)}>{tab}</button></details>)}</details></nav>
-        <main><h1>{page}</h1>{page === 'Camera' ? <Camera state={state}/> : state?.connected ? <>
+            {Object.entries({'Align & Samples':['Camera','Bookmarks'], 'RunEngine':['Queue & Console']}).map(([section, tabs]) =>
+                <details key={section} open><summary>{section}</summary>{tabs.map(tab=><button key={tab} aria-current={page === tab ? 'page' : undefined}
+                    onClick={() => navigate(tab)}>{tab}</button>)}</details>)}</details></nav>
+        <main><h1>{page}</h1>{page === 'Camera' ? <Camera state={state}/> : page==='Bookmarks' ? <Bookmarks request={request} state={state}/> : state?.connected ? <>
             <Capabilities caps={state.capabilities}/>
             <QueuePanel state={state}/>
             {!state.errors.queue && <Items title="Pending queue" items={state.queue}/>}

@@ -84,11 +84,14 @@ class Commissioning:
             raise Refused('Unknown workstation command')
         if not device:
             raise Refused('This control has no commissioned device binding')
+        return await self.submit_named(plan, [device, value], device=device, value=value)
+
+    async def submit_named(self, plan, args, *, device=None, value=None):
         if self.lock.locked() or self.pending:
             raise Refused('A previous command is not yet resolved; check history')
         async with self.lock:
             caps = await self.discover()
-            if plan not in caps['plans'] or device not in caps['movable']:
+            if plan not in caps['plans'] or (device is not None and device not in caps['movable']):
                 raise Refused('Required plan or movable device is not allowed for this login')
             blocker = idle_blocker(await self.get('status'))
             if blocker:
@@ -97,7 +100,7 @@ class Commissioning:
             self.finished_at = None
             self.command = dict(state='sending', plan=plan, device=device, value=value,
                                 tag=tag, uid=None)
-            item = dict(item_type='plan', name=plan, args=[device, value],
+            item = dict(item_type='plan', name=plan, args=args,
                         meta={'smi_acquire_command': tag})
             try:
                 receipt = await self.execute_item(item)
