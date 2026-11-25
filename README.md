@@ -1,5 +1,8 @@
 # smi-acquire
 
+QueueServer branch: [run the Finch workstation monitor](docs/WORKSTATION.md)
+for a camera preview, queue, history and RunEngine console.
+
 An **interrogation-driven acquisition builder** for the NSLS-II **SMI-SWAXS** endstation.
 
 You don't pick "experiment A–O". You're **interviewed** — a guided set of plain-language
