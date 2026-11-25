@@ -7,6 +7,14 @@ import time
 from uuid import uuid4
 
 
+# Defaults are in installed motor coordinates. The profile has chi, not piezo phi.
+PIEZO_DEFAULTS = {
+    'sample_piezo_x': (100., 'um'), 'sample_piezo_y': (100., 'um'),
+    'sample_piezo_z': (100., 'um'), 'sample_piezo_th': (.1, 'deg'),
+    'sample_piezo_chi': (.1, 'deg'),
+}
+
+
 class Refused(ValueError):
     """No plan was submitted."""
 
@@ -41,13 +49,32 @@ def device_names(tree, prefix=''):
 
 
 class Commissioning:
-    def __init__(self, get, execute_item, *, exposure=None, axis=None, step=None, units=None):
+    def __init__(self, get, execute_item, *, exposure=None, axis=None, step=None, units=None,
+                 piezo_jogs=False, angular_step=None):
         for name in (exposure, axis):
             if name is not None and not re.fullmatch(r'[A-Za-z]\w*(?:\.[A-Za-z]\w*)*', name):
                 raise ValueError('Use a worker device name, not a PV address')
-        if any(x is not None for x in (axis, step, units)) and not (
+        self.jogs = {}
+        if piezo_jogs:
+            if axis is not None or units is not None:
+                raise ValueError('Use either the piezo panel or a single-axis binding')
+            for size in (s for s in (step, angular_step) if s is not None):
+                if not math.isfinite(size) or size <= 0:
+                    raise ValueError('Jog steps must be positive and finite')
+            for name, (default_step, unit) in PIEZO_DEFAULTS.items():
+                override = angular_step if unit == 'deg' else step
+                self.jogs[name] = (default_step if override is None else override, unit)
+        elif angular_step is not None:
+            raise ValueError('--angular-step-deg requires --piezo-jogs')
+        elif axis in PIEZO_DEFAULTS:
+            default_step, default_units = PIEZO_DEFAULTS[axis]
+            step = default_step if step is None else step
+            units = default_units if units is None else units
+        if not piezo_jogs and any(x is not None for x in (axis, step, units)) and not (
                 axis and units and step and math.isfinite(step) and step > 0):
             raise ValueError('A jog requires a verified axis, positive step and motor units')
+        if axis:
+            self.jogs[axis] = (step, units)
         self.get, self.execute_item = get, execute_item
         self.exposure, self.axis, self.step, self.units = exposure, axis, step, units
         self.command = None
@@ -59,7 +86,8 @@ class Commissioning:
         plans, devices = await asyncio.gather(self.get('plans/allowed'), self.get('devices/allowed'))
         names = dict(device_names(devices['devices_allowed']))
         self.caps = dict(plans=sorted(plans['plans_allowed']), devices=sorted(names),
-                         movable=[k for k in (self.axis, self.exposure) if names.get(k)],
+                         movable=[k for k in (*self.jogs, self.exposure) if names.get(k)],
+                         jogs=[dict(device=k, step=s, units=u) for k, (s,u) in self.jogs.items()],
                          exposure=self.exposure, axis=self.axis, step=self.step, units=self.units)
         return self.caps
 
@@ -67,7 +95,7 @@ class Commissioning:
     def pending(self):
         return self.command and self.command['state'] in ('sending', 'accepted', 'unknown')
 
-    async def submit(self, action, value, *, exposure_rbv=None):
+    async def submit(self, action, value, *, exposure_rbv=None, jog_device=None):
         if type(value) not in (float, int) or not math.isfinite(value):
             raise Refused('Enter a finite numeric value')
         if action == 'exposure':
@@ -77,8 +105,11 @@ class Commissioning:
             if exposure_rbv is None or not math.isfinite(exposure_rbv):
                 raise Refused('Camera exposure readback is unavailable')
         elif action == 'jog':
-            plan, device = 'mvr', self.axis
-            if not self.step or abs(value) != self.step:
+            plan, device = 'mvr', self.axis if jog_device is None else jog_device
+            if not isinstance(device, str) or device not in self.jogs:
+                raise Refused('Select a bound jog axis')
+            step, _ = self.jogs[device]
+            if step is None or abs(value) != step:
                 raise Refused('Only the configured jog step is enabled')
         else:
             raise Refused('Unknown workstation command')

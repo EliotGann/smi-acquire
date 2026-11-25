@@ -151,16 +151,19 @@ def live_transport(uri, key):
 
 
 class Simulator:
-    def __init__(self):
+    def __init__(self, *, piezo_jogs=False, angular_step=None, step=None):
         from bluesky import RunEngine
         from ophyd import Signal
         self.engine = RunEngine({}, context_managers=[])
-        self.x = Signal(name='sim_x', value=0.0)
+        self.motors = {name: Signal(name=name, value=0.) for name in (
+            [f'sample_piezo_{a}' for a in ('x','y','z','th','chi')] if piezo_jogs else ['sim_x'])}
+        self.x = next(iter(self.motors.values()))
         self.exposure = Signal(name='sim_exposure', value=0.1)
         self.history = deque(maxlen=100)
         self.log = deque(['Simulated worker ready.'], maxlen=100)
-        self.controls = Commissioning(self.get, self.immediate, exposure='sim_exposure',
-                                     axis='sim_x', step=.1, units='sim units')
+        jogs = (dict(piezo_jogs=True, step=step, angular_step=angular_step) if piezo_jogs
+                else dict(axis='sim_x', step=.1, units='sim units'))
+        self.controls = Commissioning(self.get, self.immediate, exposure='sim_exposure', **jogs)
         self.demo = DemoQueue(self.history, self.log)
         self.queue_controls = QueueControls(self.get, self.demo.post, self.controls)
         self.records = {}
@@ -168,21 +171,23 @@ class Simulator:
         from .bookmark_edit import editor
         from smi_plans import SampleStore
         self.bookmarks.edit = editor(lambda keys, update: update(SampleStore(self.records)),
-                                     lambda: dict(piezo_x=self.x.get(), piezo_y=0., piezo_z=0.))
+                                     lambda: ({k.removeprefix('sample_'): m.get() for k,m in self.motors.items()}
+                                              if piezo_jogs else dict(piezo_x=self.x.get(), piezo_y=0., piezo_z=0.)))
 
     async def get(self, path):
         return {'plans/allowed': {'plans_allowed': {'mv': {}, 'mvr': {}}},
                 'devices/allowed': {'devices_allowed': {s.name: {'is_movable': True}
-                                                        for s in (self.x, self.exposure)}},
+                                                        for s in (*self.motors.values(), self.exposure)}},
                 'status': self.demo.status()}[path]
 
     async def immediate(self, item):
         import bluesky.plan_stubs as bps
         name = item['name']
-        if name == 'mvr' and item['args'][0] == self.x.name:
+        if name == 'mvr' and item['args'][0] in self.motors:
+            motor = self.motors[item['args'][0]]
             value = item['args'][1]
-            self.engine(bps.mvr(self.x, value))
-            message = f'Simulated stage X = {self.x.get():.2f}'
+            self.engine(bps.mvr(motor, value))
+            message = f'{motor.name} = {motor.get():g}'
         elif name == 'mv' and item['args'][0] == self.exposure.name:
             value = item['args'][1]
             self.engine(bps.mv(self.exposure, value))
@@ -220,10 +225,14 @@ class LiveCamera:
         from .microscope.camera_stream import CameraStream
         from .microscope.config import load_config
         from .microscope.devices import Camera
-        cfg = load_config(config).epics
+        self.config = load_config(config)
+        cfg = self.config.epics
         self.epics_cfg = cfg
         self.pose_signals = {}
-        self.stream = CameraStream(Camera.from_config(cfg), None, epics_cfg=cfg)
+        self.chi_signals = {}
+        self.display_size = None
+        self.stream = CameraStream(Camera.from_config(cfg), None, epics_cfg=cfg,
+                                   display_max_dim=self.config.ui.display_max_dim)
         self.pva = cfg.image_protocol.lower() == 'pva'
 
     def exposure_readback(self):
@@ -244,11 +253,54 @@ class LiveCamera:
                 for k, s in self.pose_signals.items()}
 
     def image(self):
+        from .microscope.camera_stream import stride_for_max_dim
         rgb = self.stream.grab_rgb()
         if rgb is None or (self.pva and time.monotonic() - self.stream.frame_stamp() > 5):
+            self.display_size = None
             return None
-        stride = max(1, (max(rgb.shape[:2]) + 959) // 960)
-        return Image.fromarray(rgb[::stride, ::stride])
+        stride = stride_for_max_dim(rgb.shape[1], rgb.shape[0], self.config.ui.display_max_dim)
+        image = Image.fromarray(rgb[::stride, ::stride])
+        self.display_size = image.size
+        return image
+
+    def read_chi(self, stack):
+        from ophyd import EpicsSignalRO
+        motors = self.epics_cfg.piezo_motors if stack == 'piezo' else self.epics_cfg.stage_motors
+        if not motors.get('chi'):
+            raise ValueError(f'No {stack} chi readback configured')
+        if stack not in self.chi_signals:
+            self.chi_signals[stack] = EpicsSignalRO(motors['chi'] + '.RBV', name=f'{stack}_chi')
+        angle = float(self.chi_signals[stack].get(use_monitor=False, timeout=1, connection_timeout=1))
+        if not math.isfinite(angle):
+            raise ValueError(f'Invalid {stack} chi readback')
+        return angle
+
+    def preview(self, stack, x, y, width, height):
+        from .microscope.calibration import CalibrationModel
+        from numpy.linalg import LinAlgError
+        if self.display_size != (width, height):
+            raise ValueError('Image dimensions changed or frame unavailable; click the current frame')
+        if stack not in ('piezo', 'huber') or not (0 <= x < width and 0 <= y < height):
+            raise ValueError('Invalid stack or image coordinates')
+        cfg = self.config
+        field = 'matrix' if stack == 'piezo' else 'huber_matrix'
+        if field not in cfg.calibration.model_fields_set or 'center_px' not in cfg.beam.model_fields_set:
+            raise ValueError('No saved calibration matrix or beam center in the selected YAML')
+        center = cfg.beam.center_px
+        if not (0 <= center[0] < width and 0 <= center[1] < height):
+            raise ValueError('Configured beam center is outside this image')
+        chi = self.read_chi('huber')
+        if stack == 'piezo':
+            chi += self.read_chi('piezo')
+        try:
+            model = CalibrationModel(getattr(cfg.calibration, field))
+            dx, dy = model.click_to_motor_delta((x, y), center, chi_deg=chi)
+        except LinAlgError as exc:
+            raise ValueError('Saved matrix is singular') from exc
+        if not all(map(math.isfinite, (dx, dy))):
+            raise ValueError('Invalid calibration result')
+        return dict(stack=stack, x=x, y=y, center=center, chi=chi, dx=float(dx), dy=float(dy),
+                    units=cfg.ui.motor_units if stack == 'piezo' else 'mm')
 
 
 async def update_frame(camera, cache):
@@ -314,6 +366,21 @@ class API(RequestHandler):
                             queue_message=backend.queue_controls.message if backend.queue_controls else '',
                             command=ctrl.command if ctrl else None, exposure_rbv=rbv,
                             confirmation=ctrl.exposure_confirmation(rbv, stamp) if ctrl else None))
+        elif resource == 'click-preview':
+            camera = self.settings.get('live_camera')
+            if camera is None:
+                raise HTTPError(404)
+            try:
+                result = await asyncio.to_thread(camera.preview, self.get_argument('stack'),
+                    float(self.get_argument('x')), float(self.get_argument('y')),
+                    int(self.get_argument('width')), int(self.get_argument('height')))
+            except ValueError as exc:
+                self.set_status(409)
+                self.write({'error': str(exc)})
+                return
+            except (OSError, RuntimeError, TypeError):
+                raise HTTPError(503, reason='Chi readback unavailable')
+            self.write(result)
         elif resource == 'bookmarks':
             view = getattr(self.settings['backend'], 'bookmarks', None)
             if view is None:
@@ -387,8 +454,9 @@ class API(RequestHandler):
         if not backend.controls or resource not in {'jog', 'exposure'}:
             raise HTTPError(405)
         try:
-            value = json.loads(self.request.body)['value']
-            cmd = await backend.controls.submit(resource, value, exposure_rbv=self.readback(backend))
+            body = json.loads(self.request.body)
+            cmd = await backend.controls.submit(resource, body['value'], jog_device=body.get('device'),
+                                                exposure_rbv=self.readback(backend))
         except Refused as exc:
             self.set_status(409)
             self.write({'error': str(exc)})
@@ -418,7 +486,8 @@ async def serve(args):
                     raise ValueError('--bookmark-goto-max-um requires --bookmarks and a positive travel cap')
                 backend.bookmark_goto_max_um = args.bookmark_goto_max_um
             backend.controls = Commissioning(backend.read, immediate, exposure=args.exposure_device,
-                                             axis=args.jog_axis, step=args.jog_step, units=args.jog_units)
+                                             axis=args.jog_axis, step=args.jog_step, units=args.jog_units,
+                                             piezo_jogs=args.piezo_jogs, angular_step=args.angular_step_deg)
             if args.queue_controls:
                 backend.queue_controls = QueueControls(backend.read, post, backend.controls)
             camera = LiveCamera(args.live_camera_config)
@@ -429,13 +498,15 @@ async def serve(args):
             tasks.append(asyncio.create_task(poll(backend)))
             tasks.append(asyncio.create_task(monitor_exposure(camera, cache)))
         else:
-            camera = backend = Simulator()
+            camera = backend = Simulator(piezo_jogs=args.piezo_jogs, step=args.jog_step,
+                                         angular_step=args.angular_step_deg)
             await backend.controls.discover()
         tasks.append(asyncio.create_task(update_frame(camera, cache)))
         key = secrets.token_urlsafe(32)
         app = Application([(r'/api/([^/]+)', API), (r'/(.*)', StaticFileHandler,
                           {'path': str(root), 'default_filename': 'index.html'})],
-                          backend=backend, cache=cache, session_key=key)
+                           backend=backend, cache=cache, session_key=key,
+                           live_camera=camera if args.live_camera_config else None)
         server = app.listen(5097, address='127.0.0.1')
         close.append(server.stop)
         logging.getLogger(__name__).info('Workstation started: %s', backend.state['mode'])
@@ -460,7 +531,10 @@ if __name__ == '__main__':
     parser.add_argument('--live-camera-config', type=Path, metavar='PATH',
                         help='Opt into live reads using this microscope config; default: simulation')
     parser.add_argument('--exposure-device', help='Verified worker setpoint for the configured camera (seconds)')
-    parser.add_argument('--jog-axis', help='One verified sample-stage worker motor')
+    jog_mode = parser.add_mutually_exclusive_group()
+    jog_mode.add_argument('--jog-axis', help='One verified sample-stage worker motor (piezo XYZ: 100 um; theta/chi: 0.1 deg)')
+    jog_mode.add_argument('--piezo-jogs', action='store_true', help='Show X/Y/Z and theta/chi in one panel')
+    parser.add_argument('--angular-step-deg', type=float, help='Override the 0.1 degree theta/chi jog step')
     parser.add_argument('--jog-step', type=float, help='Fixed relative step in installed motor units')
     parser.add_argument('--jog-units', help='Verified units of the configured motor')
     parser.add_argument('--queue-controls', action='store_true',

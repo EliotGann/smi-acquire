@@ -39,6 +39,16 @@ API. Stop the launcher before changing operator sessions.
 
 ## Commission one exposure, then one jog
 
+On the live Camera page, a click shows a displacement preview using the
+selected microscope YAML's saved beam center, piezo/Huber matrix and display
+pixel stride (`ui.display_max_dim`), plus current chi readbacks. Compare with
+the legacy Move panel on the same image feature and stack. Only click once in
+the legacy app: its second click can commit a move. Finch image clicks are
+preview-only. A legacy matrix loaded only into memory from the config store
+must be compared separately from the YAML. `ui.default_step` is a jog choice,
+not a calibration coefficient; the workstation's commissioning jog settings
+are independent of it.
+
 1. Launch with the live camera config alone. Open **Queue & Console →
    Capabilities for this workstation login**. Look for `mv`, `mvr`, the
    on-axis camera's exposure setpoint and the intended sample axis. The lists
@@ -68,6 +78,7 @@ API. Stop the launcher before changing operator sessions.
 4. After exposure commissioning, verify one sample axis's installed mapping,
    limits, native units and motion direction. To enable that axis, also pass
    `--jog-axis "$JOG_DEVICE" --jog-step "$JOG_STEP" --jog-units "$JOG_UNITS"`
+   (for piezo Y, `--jog-axis sample_piezo_y` alone defaults to 100 um)
    with reviewed values. Buttons request exactly ± that step. Observe the
    physical axis readback separately. Positive means positive in the installed
    motor coordinates; no camera or beamline-frame sign conversion is applied.
@@ -82,6 +93,17 @@ the app loses its local tracking state; it does not cancel a worker plan.
 
 To return to a monitor-only session, omit the device bindings. The existing
 Panel `app` and `app-real` tasks are separate.
+
+### All sample piezos in one panel
+
+Use `--piezo-jogs` instead of `--jog-axis`. Each row sends **one** immediate
+`mvr` to its named worker device. X/Y/Z default to 100 um (`--jog-step`
+overrides the translational step); theta and chi both default to 0.1 degree.
+An explicit positive `--angular-step-deg` overrides the step for both
+angular rows. The profile does not define piezo phi. `sample_piezo_th` maps to `piezo.th`, `sample_piezo_chi` to
+`piezo.ch`. The labels use installed motor coordinates, with no sign or unit
+conversion. Missing worker aliases remain disabled. Use the same flags without
+`--live-camera-config` to exercise the five in-memory motors first.
 
 ## Queue & Console controls
 

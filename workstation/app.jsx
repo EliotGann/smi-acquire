@@ -47,6 +47,22 @@ function Camera({state}) {
     const [url, error] = usePoll('frame', 300, true);
     const [message, setMessage] = useState(''), [pending, setPending] = useState(false);
     const [seconds, setSeconds] = useState('');
+    const [previewStack,setPreviewStack] = useState('piezo'), [previewText,setPreviewText] = useState('');
+    const [previewBusy,setPreviewBusy] = useState(false);
+    const live = state?.mode === 'live monitor';
+    async function preview(e) {
+        if (!live || previewBusy) return;
+        const img = e.currentTarget, rect = img.getBoundingClientRect();
+        const width = img.naturalWidth, height = img.naturalHeight;
+        if (!width || !height || !rect.width || !rect.height) return;
+        const x = (e.clientX-rect.left)*width/rect.width, y = (e.clientY-rect.top)*height/rect.height;
+        setPreviewBusy(true);
+        try {
+            const p = await (await request('click-preview?' + new URLSearchParams({stack:previewStack,x,y,width,height}))).json();
+            setPreviewText(`${p.stack} at pixel (${p.x.toFixed(1)}, ${p.y.toFixed(1)}), beam (${p.center.join(', ')}), χ ${p.chi.toFixed(3)}°: Δx ${p.dx.toFixed(4)}, Δy ${p.dy.toFixed(4)} ${p.units}`);
+        } catch (err) {setPreviewText(err.message);}
+        finally {setPreviewBusy(false);}
+    }
     const caps = state?.capabilities, command = state?.command;
     const ready = state?.connected && state?.idle && !pending &&
         !['sending', 'accepted', 'unknown'].includes(command?.state);
@@ -60,23 +76,28 @@ function Camera({state}) {
         !ready ? `Previous command: ${command.state}; check history` :
         state.exposure_rbv == null ? 'Exposure readback unavailable' :
         !(+seconds >= .0001 && +seconds <= 2) ? 'Enter 0.0001 to 2 seconds' : '';
-    async function send(action, value) {
+    async function send(action, value, device) {
         setPending(true);
         try {
-            const cmd = await (await request(action, undefined, 'POST', {value})).json();
+            const cmd = await (await request(action, undefined, 'POST', {value,device})).json();
             setMessage(`Request ${cmd.tag}: ${cmd.state}`);
         } catch (err) { setMessage(err.message); }
         finally {setPending(false);}
     }
     return <section><h2>On-axis camera</h2><p>{state?.mode === 'simulation' ? 'Synthetic image' : 'Direct EPICS readback'}</p>
-        {url ? <img className="camera" src={url} alt="Latest on-axis camera frame"/> : <p>{error || 'Waiting for a frame…'}</p>}
+        {live && <p><label>Click preview (no motion) <select value={previewStack} disabled={previewBusy}
+            onChange={e=>{setPreviewStack(e.target.value);setPreviewText('');}}><option value="piezo">Piezo XY</option><option value="huber">Huber XY</option></select></label></p>}
+        {url ? <img className="camera" src={url} onClick={preview} alt="Latest on-axis camera frame"/> : <p>{error || 'Waiting for a frame…'}</p>}
+        {live && <output aria-live="polite">{previewBusy?'Reading chi…':previewText || 'Click an image feature to preview its displacement.'}</output>}
         <fieldset><legend>Immediate plans</legend><p>Exposure readback: {state?.exposure_rbv == null ? 'unavailable' : `${state.exposure_rbv} s`}</p>
             <label>Requested exposure (s) <input type="number" min="0.0001" max="2" step="any" value={seconds} onChange={e=>setSeconds(e.target.value)}/></label>
             <button disabled={Boolean(exposureBlocker)}
                 onClick={()=>send('exposure', +seconds)}>Set exposure</button>
             {exposureBlocker && <small>{exposureBlocker}</small>}
-            {caps?.axis && <p>{[-1,1].map(sign=><button key={sign} disabled={!allowed('mvr', caps.axis)} onClick={()=>send('jog', sign*caps.step)}>
-                Jog {caps.axis} {sign>0?'+':'−'}{caps.step} {caps.units}</button>)}</p>}
+            {caps?.jogs?.map(({device,step,units})=><p key={device}><strong>{device}</strong>{[-1,1].map(sign=><button key={sign}
+                aria-label={`Jog ${device} ${sign>0?'+':'−'}${step ?? ''} ${units}`} disabled={!step || !allowed('mvr',device)}
+                onClick={()=>send('jog',sign*step,device)}>{sign>0?'+':'−'}{step ?? '—'} {units}</button>)}
+                {!caps.movable.includes(device)?'Not advertised as movable':!step?'Set --angular-step-deg to enable':''}</p>)}
             <output>{message}</output>{command && <p role="status">{command.plan} {command.device} {command.value}: {command.state} {command.outcome} {command.message}
                 <small>Item UID: {command.uid || 'not available'}{state.confirmation && ` · Exposure RBV: ${state.confirmation}`}</small></p>}
         </fieldset></section>;
@@ -88,7 +109,7 @@ function Capabilities({caps}) {
     const devices = caps.devices.filter(d=>d.toLowerCase().includes(query.toLowerCase()));
     return <details><summary>Capabilities for this workstation login</summary>
         <p>mv: {caps.plans.includes('mv')?'allowed':'missing'} · mvr: {caps.plans.includes('mvr')?'allowed':'missing'}</p>
-        {[['Exposure', caps.exposure], ['Jog', caps.axis]].map(([label,device])=><p key={label}>{label}: {device ? `${device} (${caps.movable.includes(device)?'movable':'not listed as movable'})` : 'not bound'}</p>)}
+        {[['Exposure', caps.exposure], ...(caps.jogs?.length ? caps.jogs.map(j=>['Jog',j.device]) : [['Jog',null]])].map(([label,device])=><p key={`${label}:${device}`}>{label}: {device ? `${device} (${caps.movable.includes(device)?'movable':'not listed as movable'})` : 'not bound'}</p>)}
         <details><summary>Allowed plans ({caps.plans.length})</summary>{caps.plans.join(', ')}</details>
         <label>Find a device <input value={query} onChange={e=>setQuery(e.target.value)} placeholder="e.g. acquire_time"/></label>
         <p>{devices.length} matches (first 100)</p><pre>{devices.slice(0,100).join('\n')}</pre></details>;

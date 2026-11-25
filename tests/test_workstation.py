@@ -76,6 +76,58 @@ def test_reject_cleartext_upstream_before_using_key():
         live_transport('http://localhost', 'unused')
 
 
+def test_click_preview_uses_legacy_display_pixels_and_stack_chi():
+    import numpy as np
+    from smi_acquire.microscope.config import AppConfig
+    from smi_acquire.workstation import LiveCamera
+    cam = LiveCamera.__new__(LiveCamera)
+    cam.config = AppConfig.model_validate(dict(epics={'camera_prefix':'TEST:', 'motors':{}},
+        ui={'display_max_dim':1280, 'motor_units':'um'}, beam={'center_px':[525,333]},
+        calibration={'matrix':[[-.138,-.0044],[.0043,-.1384]],
+                     'huber_matrix':[[-138,-4.9],[4.2,-138.5]]}))
+    cam.stream = Mock()
+    cam.stream.grab_rgb.return_value = np.zeros((2472,3296,3), dtype=np.uint8)
+    cam.pva = False
+    assert cam.image().size == (1099,824)
+    cam.read_chi = lambda stack: 90 if stack=='piezo' else 0
+    piezo = cam.preview('piezo',535,333,1099,824)
+    assert (piezo['dx'],piezo['dy']) == pytest.approx((2.249175,-72.392055))
+    huber = cam.preview('huber',535,333,1099,824)
+    assert huber['units']=='mm' and (huber['dx'],huber['dy']) == pytest.approx((.07238583,.00219509), abs=1e-8)
+    with pytest.raises(ValueError, match='dimensions'):
+        cam.preview('piezo',535,333,824,618)
+
+
+def test_piezo_panel_selects_one_motor_and_checks_its_own_step():
+    from smi_acquire.commissioning import Refused
+
+    async def exercise():
+        sim = Simulator(piezo_jogs=True, angular_step=.025)
+        caps = await sim.controls.discover()
+        assert len(caps['jogs']) == 5
+        for jog in caps['jogs']:
+            name = jog['device']
+            step = .025 if name.endswith(('_th', '_chi')) else 100.
+            assert jog['step'] == step
+            before = {k:m.get() for k,m in sim.motors.items()}
+            result = await sim.controls.submit('jog', -step, jog_device=name)
+            assert result['outcome'] == 'completed'
+            assert {k:m.get() for k,m in sim.motors.items()} == {**before, name:before[name]-step}
+        for device in ('sample_piezo_th', 'sample_piezo_chi', 'stage_x', None):
+            with pytest.raises(Refused):
+                await sim.controls.submit('jog', 100., jog_device=device)
+        defaults = Simulator(piezo_jogs=True)
+        await defaults.controls.submit('jog', 100, jog_device='sample_piezo_z')
+        await defaults.controls.submit('jog', -.1, jog_device='sample_piezo_th')
+        assert defaults.motors['sample_piezo_z'].get() == 100
+        assert defaults.motors['sample_piezo_th'].get() == -.1
+        await defaults.controls.submit('jog', .1, jog_device='sample_piezo_chi')
+        assert defaults.motors['sample_piezo_chi'].get() == .1
+        assert defaults.motors['sample_piezo_th'].get() == -.1
+
+    asyncio.run(exercise())
+
+
 def test_live_submission_uses_only_immediate_endpoint_and_preserves_metadata(monkeypatch):
     client = Mock()
     client.fetch = AsyncMock(return_value=SimpleNamespace(body=b'{"success":true,"item":{"item_uid":"received"}}'))
